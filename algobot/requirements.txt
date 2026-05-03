@@ -1,6 +1,0 @@
-alpaca-trade-api
-kalshi-python
-pandas
-rich
-python-dotenv
-requests
