@@ -1,0 +1,48 @@
+{
+  "ts": "2026-05-02T02:31:17.408300",
+  "mode": "PAPER",
+  "risk": {
+    "kill_switch": false,
+    "sentiment_halt": false,
+    "sentiment_reason": "",
+    "starting_equity": 101307.05,
+    "current_equity": 101307.05,
+    "daily_pnl_pct": 0.0,
+    "open_equity": 0,
+    "open_kalshi": 0,
+    "equity_allocated": 0.0,
+    "kalshi_allocated": 0.0,
+    "current_vix": 20.0,
+    "size_multiplier": 1.0
+  },
+  "equity_positions": [],
+  "signals": {},
+  "trade_log": [],
+  "arb_table": [],
+  "confidence_table": [],
+  "kalshi_positions": [],
+  "kalshi_trade_log": [],
+  "orderbook": {},
+  "velocity": {},
+  "summary": {
+    "equity_open_pnl": 0,
+    "kalshi_open_pnl": 0,
+    "equity_realized_pnl": 0,
+    "kalshi_realized_pnl": 0,
+    "total_open_pnl": 0,
+    "total_realized_pnl": 0
+  },
+  "watchdog": {
+    "equity_alive": true,
+    "kalshi_alive": null,
+    "equity_restarts": 0,
+    "kalshi_restarts": 0
+  },
+  "data_sources": {
+    "polygon": false,
+    "finnhub": false,
+    "coingecko": true,
+    "action_network": true,
+    "sportradar": false
+  }
+}
