@@ -1,0 +1,9 @@
+streamlit
+plotly
+pandas
+numpy
+requests
+cryptography
+rich
+alpaca-trade-api
+questionary
