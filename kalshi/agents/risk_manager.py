@@ -138,6 +138,9 @@ class RiskManager:
         realized = self.journal.realized_pnl_total()
         stake = self.stake_usd()
         by_stake = math.floor(stake / per_contract + 1e-9)
+        factor, _ = self.cooldown_factor()
+        if by_stake == 0 and factor < 1 and stake / factor >= per_contract:
+            by_stake = 1          # cool-down shrinks the bet, but never to nothing: keep learning at 1 contract
 
         event_cost = sum(self._position_cost(o) for o in open_pos if o.event_ticker == p.event_ticker)
         room = s.risk_max_event_exposure_usd - event_cost

@@ -44,6 +44,7 @@ RISK = Agent.RISK.value
 EXEC = Agent.EXECUTION.value
 MONITOR = Agent.MONITOR.value
 LEARNER = "learner"
+SHADOW = "shadow"
 
 
 def pass_category(reason: str) -> str:
@@ -90,7 +91,7 @@ class CycleStats:
 
 class Orchestrator:
     def __init__(self, settings, *, scout, edge_finder, skeptic, risk, execution, monitor, journal,
-                 learner=None):
+                 learner=None, shadow=None):
         self.s = settings
         self.scout = scout
         self.edge = edge_finder
@@ -107,6 +108,7 @@ class Orchestrator:
         self._cycle_no = 0
         self.last_cycle: CycleStats | None = None
         self.learner = learner
+        self.shadow = shadow
         self._last_learn = 0.0
         self._learning = threading.Lock()
         self._backfilled = False
@@ -221,6 +223,11 @@ class Orchestrator:
             stats.bump(EXEC)
         else:
             stats.executed += 1
+            if self.shadow is not None and p.filled_count:
+                try:
+                    self.shadow.record_bot_trade(p)
+                except Exception as e:
+                    log.debug("bot trade not recorded for post-mortem: %s", e)
         self.board.said(EXEC, v.decision.value, f"{ticker}: {v.reason} [{p.status.value}]",
                         ticker=ticker, detail=v.data_snapshot)
         self.journal.save(p)
@@ -274,6 +281,7 @@ class Orchestrator:
             msg += f", {len(rep.mismatches)} position mismatch(es)"
         self.board.said(MONITOR, "INFO", msg, detail={"settled": rep.settled_now, "mismatches": rep.mismatches,
                                                       "reconcile": [p.proposal_id for p in rep.needs_reconcile]})
+        self._settle_shadows()
         for p in rep.needs_reconcile:
             self.board.working(EXEC, f"reconciling {p.market_ticker} ({p.status.value})", p.market_ticker)
             try:
@@ -284,6 +292,25 @@ class Orchestrator:
                 log.error("reconcile %s failed: %s", p.proposal_id, e)
                 self.board.said(EXEC, "ERROR", f"reconcile {p.market_ticker} failed: {e}", ticker=p.market_ticker)
         self._last_monitor = time.monotonic()
+
+    def _settle_shadows(self) -> None:
+        if self.shadow is None:
+            return
+        try:
+            done = self.shadow.settle()
+        except Exception as e:
+            log.warning("shadow settle failed: %s", e)
+            self.board.said(SHADOW, "ERROR", f"settling shadow trades failed: {e}")
+            return
+        if not done:
+            return
+        tally: dict[str, list[int]] = {}
+        for d in done:
+            tally.setdefault(d["strategy"], [0, 0])[0 if d["won"] else 1] += 1
+        summary = ", ".join(f"{k} {w}W/{l}L" for k, (w, l) in sorted(tally.items()))
+        self.board.said(SHADOW, "INFO", f"settled {len(done)}: {summary}. Latest: {done[-1]['text']}",
+                        detail={"settled": len(done), "by_strategy": tally},
+                        activity="waiting for the next 15-minute markets to close")
 
     # ── Why-no-trades tally ──────────────────────────────────────────────────
 
@@ -310,9 +337,10 @@ class Orchestrator:
                                             "of settled markets")
                 try:
                     from kalshi import backfill
-                    rep = backfill.run(self.s, self.journal, self.learner.data)
+                    rep = backfill.run(self.s, self.journal, self.learner.data, shadow=self.shadow)
                     msg = (f"loaded {rep['observations']:,} labelled snapshots from {rep['markets']} settled "
-                           f"markets ({rep['skipped']} already known)")
+                           f"markets ({rep['skipped']} already known) and replayed {rep['shadow_trades']:,} "
+                           f"shadow trades on them")
                     if rep["errors"]:
                         msg += f"; {len(rep['errors'])} problem(s): {rep['errors'][0]}"
                     self.journal.log_event("learner", msg)
@@ -329,10 +357,22 @@ class Orchestrator:
                 pass
             counts = self.journal.observation_counts()
             p = self.learner.store.get()
-            detail = {"version": p.version, "sigma_scale": p.sigma_scale, "model_weight": p.model_weight,
-                      "edge_min_cents": "PAUSED" if p.paused else p.edge_min_cents,
+            trade_lessons = []
+            try:
+                from kalshi.agents.shadow import lessons
+                trade_lessons = lessons(self.journal.shadow_rows(limit=5000))
+            except Exception as e:
+                log.debug("lessons failed: %s", e)
+            explore = (" Paper exploration is ON: the bot keeps taking small paper trades on the chart model "
+                       "so it learns from its own results." if (p.paused and self.s.paper_mode and
+                                                                  self.s.paper_explore and p.chart) else "")
+            if trade_lessons:
+                report += " From settled trades: " + "; ".join(trade_lessons[:3]) + "."
+            detail = {"version": p.version, "mode": p.mode, "sigma_scale": p.sigma_scale,
+                      "model_weight": p.model_weight, "edge_min_cents": "PAUSED" if p.paused else p.edge_min_cents,
+                      "chart_lessons": p.lessons, "trade_lessons": trade_lessons,
                       "observations": counts, "labelled_this_run": labelled, **p.metrics}
-            self.board.said(LEARNER, "PAUSE" if p.paused else "INFO", report, detail=detail,
+            self.board.said(LEARNER, "PAUSE" if p.paused else "INFO", report + explore, detail=detail,
                             activity=f"next refit in {self.s.learner_interval_s / 60:.0f} min")
         except Exception as e:
             log.exception("learner failed")

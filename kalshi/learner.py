@@ -34,6 +34,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from kalshi.chart_model import ChartModel
 from kalshi.fees import worst_case_fee_per_contract_cents
 from kalshi.spot import norm_cdf
 
@@ -52,10 +53,16 @@ class LearnedParams:
     fitted_at: str = ""
     source: str = "config defaults"
     metrics: dict = field(default_factory=dict)
+    mode: str = "blend"              # "blend" (model x Kalshi price) or "chart" (chart model)
+    chart: dict = field(default_factory=dict)       # latest chart model, adopted or not (exploration uses it)
+    lessons: list = field(default_factory=list)
 
     @property
     def paused(self) -> bool:
         return self.edge_min_cents >= PAUSED
+
+    def chart_model(self):
+        return ChartModel.from_dict(self.chart)
 
 
 class ParamStore:
@@ -69,7 +76,9 @@ class ParamStore:
             raw = journal.get_flag(FLAG_KEY, "")
             if raw:
                 try:
-                    self._p = LearnedParams(**json.loads(raw))
+                    d = json.loads(raw)
+                    known = set(LearnedParams.__dataclass_fields__)
+                    self._p = LearnedParams(**{k: v for k, v in d.items() if k in known})
                 except (TypeError, ValueError):
                     log.warning("ignoring unreadable learned params")
 
@@ -127,7 +136,7 @@ class Learner:
     # ── Step 1: observe ──────────────────────────────────────────────────────
 
     def observe(self, *, ticker: str, series: str, close_ts: int, secs_left: float, spot: float,
-                strike: float, strike_type: str, sigma: float, bid: int, ask: int) -> bool:
+                strike: float, strike_type: str, sigma: float, bid: int, ask: int, feats: dict | None = None) -> bool:
         """Record at most one observation per market per minute-to-close."""
         key = (ticker, int(secs_left // 60))
         with self._lock:
@@ -138,7 +147,7 @@ class Learner:
                 self._seen.clear()
         self.journal.add_observation(ticker=ticker, series=series, close_ts=close_ts, secs_left=secs_left,
                                      spot=spot, strike=strike, strike_type=strike_type, sigma=sigma,
-                                     bid=bid, ask=ask)
+                                     bid=bid, ask=ask, feats=feats)
         return True
 
     # ── Step 2: label ────────────────────────────────────────────────────────
@@ -154,9 +163,9 @@ class Learner:
 
     # ── Step 3/4: refit ──────────────────────────────────────────────────────
 
-    def _simulate(self, rows: list[dict], scale: float, w: float, thr: float) -> tuple[int, float, float]:
-        """First entry per market where edge >= thr, held to settlement.
-        Returns (trades, mean P&L cents/contract, t-stat)."""
+    def _simulate(self, rows: list[dict], pred, thr: float) -> tuple[int, float, float]:
+        """First entry per market where edge >= thr under predictor pred(row) -> P(YES), held to
+        settlement. Returns (trades, mean P&L cents/contract, t-stat)."""
         by_mkt: dict[str, list[dict]] = {}
         for r in rows:
             by_mkt.setdefault(r["ticker"], []).append(r)
@@ -164,7 +173,7 @@ class Learner:
         for obs in by_mkt.values():
             obs.sort(key=lambda r: -r["secs_left"])
             for r in obs:
-                p = blend(norm_cdf(r["z"] / scale), (r["bid"] + r["ask"]) / 200.0, w)
+                p = pred(r)
                 choice = None
                 for side, ask, fair in (("yes", r["ask"], p), ("no", 100 - r["bid"], 1 - p)):
                     if not (self.s.edge_min_price_cents <= ask <= self.s.edge_max_price_cents):
@@ -196,6 +205,7 @@ class Learner:
             r = dict(r)
             r["z"] = z
             rows.append(r)
+        rows.sort(key=lambda r: (r["close_ts"], -r["secs_left"]))
         cur = self.store.get()
         if len(rows) < self.s.learner_min_observations:
             self.last_report = (f"waiting for data: {len(rows)} labelled observations, "
@@ -219,11 +229,37 @@ class Learner:
         adopt_cal = ll_new <= ll_cur - self.s.learner_min_improvement
         sc_use, w_use = (sc, w) if adopt_cal else (cur.sigma_scale, cur.model_weight)
 
+        # Chart model: momentum, range and volatility from the coin's own chart, plus Kalshi's price.
+        ctrain = [r for r in train if r.get("feats")]
+        cvalid = [r for r in valid if r.get("feats")]
+        chart_all, chart_note, use_chart = None, "chart model: not enough chart data yet", False
+        cm_metrics = {}
+        if len(ctrain) >= 300 and len(cvalid) >= 100:
+            cm = ChartModel.fit([r["feats"] for r in ctrain], [r["y"] for r in ctrain], l2=self.s.learner_chart_l2)
+            yv = [r["y"] for r in cvalid]
+            ll_chart = log_loss(cm.predict_many([r["feats"] for r in cvalid]), yv)
+            ll_mkt_c = log_loss([(r["bid"] + r["ask"]) / 200.0 for r in cvalid], yv)
+            ll_cal_c = log_loss(preds(cvalid, sc_use, w_use), yv)
+            use_chart = ll_chart <= min(ll_mkt_c, ll_cal_c) - self.s.learner_min_improvement
+            chart_all = ChartModel.fit([r["feats"] for r in ctrain + cvalid], [r["y"] for r in ctrain + cvalid],
+                                       l2=self.s.learner_chart_l2)
+            cm_metrics = {"chart_valid_logloss": round(ll_chart, 5), "market_valid_logloss_chart_rows": round(ll_mkt_c, 5),
+                          "chart_rows": len(ctrain) + len(cvalid)}
+            chart_note = (f"chart model {'ADOPTED' if use_chart else 'not adopted'}: held-out log loss "
+                          f"{ll_chart:.4f} vs Kalshi's price {ll_mkt_c:.4f} on {len(cvalid):,} newer snapshots")
+            pred_tr = (lambda r, m=cm: m.predict(r["feats"]))
+        if use_chart:
+            pred = pred_tr
+            sim_t, sim_v = ctrain, cvalid
+        else:
+            pred = (lambda r: blend(norm_cdf(r["z"] / sc_use), (r["bid"] + r["ask"]) / 200.0, w_use))
+            sim_t, sim_v = train, valid
+
         # Entry threshold: chosen on train, must hold up on validation.
         thr_use, thr_note = PAUSED, "no threshold showed positive value on both halves: Edge Finder paused"
         for thr in self.THRESHOLDS:
-            n_t, m_t, _ = self._simulate(train, sc_use, w_use, thr)
-            n_v, m_v, t_v = self._simulate(valid, sc_use, w_use, thr)
+            n_t, m_t, _ = self._simulate(sim_t, pred, thr)
+            n_v, m_v, t_v = self._simulate(sim_v, pred, thr)
             if (n_t >= self.s.learner_min_trades and m_t > 0 and n_v >= self.s.learner_min_trades // 2
                     and m_v > 0 and t_v >= self.s.learner_min_t):
                 thr_use = thr
@@ -233,17 +269,23 @@ class Learner:
 
         metrics = {"n_obs": len(rows), "n_train": len(train), "n_valid": len(valid),
                    "valid_logloss_new": round(ll_new, 5), "valid_logloss_current": round(ll_cur, 5),
-                   "valid_logloss_market": round(ll_mkt, 5), "candidate_scale": sc, "candidate_weight": w}
-        changed = adopt_cal or thr_use != cur.edge_min_cents
+                   "valid_logloss_market": round(ll_mkt, 5), "candidate_scale": sc, "candidate_weight": w,
+                   **cm_metrics}
+        mode = "chart" if use_chart else "blend"
+        changed = adopt_cal or thr_use != cur.edge_min_cents or mode != cur.mode
+        model_lessons = chart_all.lessons() if chart_all else []
         new = LearnedParams(sc_use, w_use, thr_use, cur.version + (1 if changed else 0),
-                            datetime.now(timezone.utc).isoformat(), "learned from settled markets", metrics)
+                            datetime.now(timezone.utc).isoformat(), "learned from settled markets", metrics,
+                            mode=mode, chart=chart_all.to_dict() if chart_all else cur.chart,
+                            lessons=model_lessons)
         self.store.set(new, self.journal)
         cal_note = (f"calibration updated: volatility x{cur.sigma_scale:g} -> x{sc:g}, model weight "
                     f"{cur.model_weight:g} -> {w:g} (held-out log loss {ll_cur:.4f} -> {ll_new:.4f}; "
                     f"market alone {ll_mkt:.4f})" if adopt_cal else
-                    f"calibration kept (x{cur.sigma_scale:g}, weight {cur.model_weight:g}); best alternative "
-                    f"x{sc:g}/{w:g} scored {ll_new:.4f} vs {ll_cur:.4f} on held-out data, not enough to switch")
-        self.last_report = f"v{new.version} on {len(rows):,} observations: {cal_note}. {thr_note}."
+                    f"calibration kept (x{cur.sigma_scale:g}, weight {cur.model_weight:g})")
+        taught = ("; chart says: " + "; ".join(model_lessons[:3])) if model_lessons else ""
+        self.last_report = (f"v{new.version} on {len(rows):,} snapshots: {chart_note}{taught}. {cal_note}. "
+                            f"{thr_note}.")
         if changed:
             self.journal.log_event("learner", self.last_report)
         log.info(self.last_report)

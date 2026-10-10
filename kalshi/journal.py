@@ -109,10 +109,38 @@ CREATE TABLE IF NOT EXISTS observations (
     bid         INTEGER,
     ask         INTEGER,
     observed_at TEXT NOT NULL,
-    y           INTEGER
+    y           INTEGER,
+    feats       TEXT
 );
 CREATE INDEX IF NOT EXISTS obs_ticker ON observations(ticker);
 CREATE INDEX IF NOT EXISTS obs_close ON observations(close_ts);
+
+CREATE TABLE IF NOT EXISTS shadow_trades (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker      TEXT NOT NULL,
+    series      TEXT,
+    strategy    TEXT NOT NULL,
+    side        TEXT NOT NULL,
+    entry_cents INTEGER NOT NULL,
+    fee_cents   REAL NOT NULL,
+    secs_left   REAL NOT NULL,
+    spot        REAL NOT NULL,
+    strike      REAL NOT NULL,
+    strike_type TEXT,
+    p_chart     REAL,
+    p_market    REAL,
+    feats       TEXT,
+    reason      TEXT,
+    opened_at   TEXT NOT NULL,
+    close_ts    INTEGER NOT NULL,
+    result      TEXT,
+    won         INTEGER,
+    pnl_cents   REAL,
+    settle_value REAL,
+    postmortem  TEXT,
+    UNIQUE (ticker, strategy)
+);
+CREATE INDEX IF NOT EXISTS shadow_close ON shadow_trades(close_ts);
 """
 
 
@@ -143,6 +171,10 @@ class Journal:
             if path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            try:                                   # journals created before chart features existed
+                self._conn.execute("ALTER TABLE observations ADD COLUMN feats TEXT")
+            except sqlite3.OperationalError:
+                pass
             self._conn.commit()
 
     def close(self) -> None:
@@ -378,14 +410,21 @@ class Journal:
     # ── Learner observations ─────────────────────────────────────────────────
 
     def add_observation(self, *, ticker, series, close_ts, secs_left, spot, strike, strike_type,
-                        sigma, bid, ask, y=None) -> None:
+                        sigma, bid, ask, y=None, feats=None) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO observations (ticker, series, close_ts, secs_left, spot, strike, strike_type,"
-                " sigma, bid, ask, observed_at, y) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " sigma, bid, ask, observed_at, y, feats) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ticker, series, int(close_ts), float(secs_left), float(spot), float(strike), strike_type,
-                 float(sigma), bid, ask, _now(), y))
+                 float(sigma), bid, ask, _now(), y, json.dumps(feats) if feats else None))
             self._conn.commit()
+
+    def last_observation(self, ticker: str) -> dict | None:
+        """The observation closest to the close (for post-mortems: where was price near the end?)."""
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM observations WHERE ticker=? ORDER BY secs_left LIMIT 1",
+                                   (ticker,)).fetchone()
+        return dict(r) if r else None
 
     def observed_tickers(self) -> set[str]:
         with self._lock:
@@ -410,7 +449,15 @@ class Journal:
             rows = self._conn.execute(
                 "SELECT * FROM observations WHERE y IS NOT NULL AND close_ts >= ? ORDER BY close_ts",
                 (int(since_ts),)).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["feats"] = json.loads(d["feats"]) if d.get("feats") else None
+            except ValueError:
+                d["feats"] = None
+            out.append(d)
+        return out
 
     def observation_counts(self) -> dict:
         with self._lock:
@@ -422,3 +469,53 @@ class Journal:
         with self._lock:
             self._conn.execute("DELETE FROM observations WHERE close_ts < ?", (int(before_ts),))
             self._conn.commit()
+
+    # ── Shadow trades (simulated, never sent) ────────────────────────────────
+
+    def add_shadow(self, t: dict) -> bool:
+        """Insert one shadow trade; False if this market already has one for this strategy."""
+        cols = ["ticker", "series", "strategy", "side", "entry_cents", "fee_cents", "secs_left", "spot", "strike",
+                "strike_type", "p_chart", "p_market", "feats", "reason", "opened_at", "close_ts", "result", "won",
+                "pnl_cents", "settle_value", "postmortem"]
+        row = dict(t)
+        row.setdefault("opened_at", _now())
+        if isinstance(row.get("feats"), dict):
+            row["feats"] = json.dumps(row["feats"])
+        with self._lock:
+            cur = self._conn.execute(
+                f"INSERT OR IGNORE INTO shadow_trades ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                [row.get(c) for c in cols])
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def shadow_keys(self) -> set[tuple[str, str]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT ticker, strategy FROM shadow_trades").fetchall()
+        return {(r[0], r[1]) for r in rows}
+
+    def pending_shadow(self, before_ts: int) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM shadow_trades WHERE won IS NULL AND close_ts < ? LIMIT 1000",
+                                      (int(before_ts),)).fetchall()
+        return [self._shadow_dict(r) for r in rows]
+
+    def settle_shadow(self, sid: int, *, result: str, won: int, pnl_cents: float, settle_value, postmortem: str):
+        with self._lock:
+            self._conn.execute("UPDATE shadow_trades SET result=?, won=?, pnl_cents=?, settle_value=?, postmortem=? "
+                               "WHERE id=?", (result, int(won), float(pnl_cents), settle_value, postmortem, int(sid)))
+            self._conn.commit()
+
+    def shadow_rows(self, limit: int = 5000, settled_only: bool = True) -> list[dict]:
+        q = "SELECT * FROM shadow_trades" + (" WHERE won IS NOT NULL" if settled_only else "")
+        with self._lock:
+            rows = self._conn.execute(q + " ORDER BY close_ts DESC, id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [self._shadow_dict(r) for r in rows]
+
+    @staticmethod
+    def _shadow_dict(r) -> dict:
+        d = dict(r)
+        try:
+            d["feats"] = json.loads(d["feats"]) if d.get("feats") else {}
+        except ValueError:
+            d["feats"] = {}
+        return d

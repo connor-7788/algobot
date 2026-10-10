@@ -20,11 +20,13 @@ from __future__ import annotations
 import logging
 import math
 import statistics
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from kalshi.agents.base import Candidate
 from kalshi.confidence import confidence_score
+from kalshi.features import chart_features, describe
 from kalshi.fees import worst_case_fee_per_contract_cents
 from kalshi.history import MarketHistory
 from kalshi.odds_api import OddsAPIClient, consensus, match_market
@@ -54,13 +56,14 @@ class EdgeFinder:
     name = Agent.EDGE_FINDER.value
 
     def __init__(self, settings, odds: OddsAPIClient, history: MarketHistory, spot=None,
-                 params=None, learner=None):
+                 params=None, learner=None, shadow=None):
         self.s = settings
         self.odds = odds
         self.history = history
         self.spot = spot            # SpotClient for crypto 15m markets
         self.params = params        # learner.ParamStore: calibration + entry threshold learned from results
         self.learner = learner      # learner.Learner: records what we saw so outcomes can teach us
+        self.shadow = shadow        # agents.shadow.Shadow: pretend trades it wouldn't take, explained later
 
     def _learned(self):
         if self.params is not None:
@@ -78,6 +81,11 @@ class EdgeFinder:
     def _edge_min(self, crypto: bool) -> float:
         p = self._learned()
         return p.edge_min_cents if (p and crypto) else self.s.edge_min_cents
+
+    def _exploring(self) -> bool:
+        """Paper only: keep trading (on the chart model) while Learner has paused, to learn from trades."""
+        p = self._learned()
+        return bool(p and p.paused and self.s.paper_mode and self.s.paper_explore)
 
     # ── Fair value: sports (devigged sportsbook consensus) ───────────────────
 
@@ -137,7 +145,26 @@ class EdgeFinder:
             return "no two-sided market to anchor fair value"
         market_mid = (bid + ask) / 200.0
         scale, weight = self._sigma_scale(), self._model_weight()
-        sources, models = [], []
+        learned = self._learned()
+        chart = learned.chart_model() if learned is not None else None
+        exploring = self._exploring()
+        mode = "chart" if (learned is not None and learned.mode == "chart" and chart) else "blend"
+        if exploring and chart:
+            mode = "explore-chart"
+        try:
+            closes = self.spot.closes(c.asset) if hasattr(self.spot, "closes") else {}
+        except Exception as e:
+            log.debug("chart closes failed: %s", e)
+            closes = {}
+        now_ts = time.time()
+
+        def feats_for(spot):
+            if not closes:
+                return None
+            return chart_features(closes=closes, now_ts=now_ts, spot=spot, strike=m.floor_strike, secs_left=secs,
+                                  sigma=sigma, strike_type=m.strike_type, bid=bid, ask=ask)
+
+        sources, models, charts = [], [], []
         for q in quotes:
             p_above = prob_avg_at_or_above(q.price, m.floor_strike, secs, sigma * scale)
             if p_above is None:
@@ -145,23 +172,44 @@ class EdgeFinder:
             p_model = p_above if m.strike_type in ("greater", "greater_or_equal") else 1.0 - p_above
             models.append(p_model)
             p_yes = blend_with_market(p_model, market_mid, weight)
+            f = feats_for(q.price) if chart else None
+            p_chart = chart.predict(f) if (chart and f) else None
+            if p_chart is not None:
+                charts.append(p_chart)
+                if mode != "blend":
+                    p_yes = p_chart
             sources.append(Source(name=q.source, probability=p_yes, fetched_at=q.fetched_at,
-                                  observed_at=q.observed_at, detail={"spot": q.price, "model": round(p_model, 5)}))
+                                  observed_at=q.observed_at,
+                                  detail={"spot": q.price, "model": round(p_model, 5),
+                                          "chart": None if p_chart is None else round(p_chart, 5)}))
+        if mode != "blend" and len(charts) < len(quotes):
+            mode = "blend"                  # chart features unavailable: fall back for every source
+            for src, p_model in zip(sources, models):
+                src.probability = blend_with_market(p_model, market_mid, weight)
         fair_yes, dispersion = consensus(sources)
         spot_mid = statistics.median(q.price for q in quotes)
-        if self.learner is not None and m.close_time and m.floor_strike:
+        feats = feats_for(spot_mid)
+        p_chart_mid = chart.predict(feats) if (chart and feats) else None
+        if m.close_time and m.floor_strike:
+            close_ts = int(m.close_time.timestamp())
             try:
-                self.learner.observe(ticker=m.ticker, series=m.series_ticker, close_ts=int(m.close_time.timestamp()),
-                                     secs_left=secs, spot=spot_mid, strike=m.floor_strike,
-                                     strike_type=m.strike_type, sigma=sigma, bid=bid, ask=ask)
+                if self.learner is not None:
+                    self.learner.observe(ticker=m.ticker, series=m.series_ticker, close_ts=close_ts,
+                                         secs_left=secs, spot=spot_mid, strike=m.floor_strike,
+                                         strike_type=m.strike_type, sigma=sigma, bid=bid, ask=ask, feats=feats)
+                if self.shadow is not None:
+                    self.shadow.consider(ticker=m.ticker, series=m.series_ticker, close_ts=close_ts, secs_left=secs,
+                                         spot=spot_mid, strike=m.floor_strike, strike_type=m.strike_type,
+                                         bid=bid, ask=ask, feats=feats, p_chart=p_chart_mid)
             except Exception as e:          # learning must never block trading decisions
-                log.warning("observation not recorded: %s", e)
+                log.warning("observation/shadow not recorded: %s", e)
         ctx = {"crypto": {"asset": c.asset, "spot": spot_mid, "strike": m.floor_strike,
                           "strike_type": m.strike_type, "seconds_left": round(secs, 1),
                           "sigma_per_min": round(sigma * 60 ** 0.5, 6),
                           "move_needed_pct": round((m.floor_strike / spot_mid - 1) * 100, 4),
                           "p_model": round(statistics.median(models), 5), "market_mid": round(market_mid, 4),
-                          "sigma_scale": scale, "model_weight": weight}}
+                          "sigma_scale": scale, "model_weight": weight, "mode": mode, "exploring": exploring,
+                          "p_chart": None if p_chart_mid is None else round(p_chart_mid, 5), "feats": feats}}
         return sources, fair_yes, dispersion, ctx
 
     # ── Reasoning text ───────────────────────────────────────────────────────
@@ -178,11 +226,17 @@ class EdgeFinder:
             k = ctx["crypto"]
             dist = -k["move_needed_pct"]
             where = "above" if dist >= 0 else "below"
+            chart = (f" Chart: {describe(k['feats'], best['side'])}." if k.get("feats") else "")
+            if k.get("mode") in ("chart", "explore-chart"):
+                how = (f"Chart model says YES {100 * fair_yes:.1f}% (distance model {100 * k['p_model']:.0f}%, "
+                       f"Kalshi mid {100 * k['market_mid']:.0f}%).")
+            else:
+                pc = f", chart model {100 * k['p_chart']:.0f}%" if k.get("p_chart") is not None else ""
+                how = (f"Distance model says YES {100 * k['p_model']:.0f}%, Kalshi mid {100 * k['market_mid']:.0f}%"
+                       f"{pc}; fair {100 * fair_yes:.1f}% (model weight {k['model_weight']:g}).")
             return (f"{k['asset']} {k['spot']:,.2f} is {abs(dist):.3f}% {where} the {k['strike']:,.2f} strike "
-                    f"with {k['seconds_left'] / 60:.1f} min left (vol {100 * k['sigma_per_min']:.3f}%/min). "
-                    f"Model says YES {100 * k['p_model']:.0f}%, Kalshi mid {100 * k['market_mid']:.0f}%, "
-                    f"blended fair {100 * fair_yes:.1f}% (model weight {k['model_weight']:g}). {trade} "
-                    f"Confidence {score}.")
+                    f"with {k['seconds_left'] / 60:.1f} min left (vol {100 * k['sigma_per_min']:.3f}%/min).{chart} "
+                    f"{how} {trade} Confidence {score}.")
         ev = ctx.get("matched_event", {})
         return (f"{ev.get('yes_team', c.market.yes_sub_title)}: {n_sources} books average "
                 f"{100 * fair_yes:.1f}% (spread between books {100 * dispersion:.1f} pts). {trade} "
@@ -236,14 +290,19 @@ class EdgeFinder:
         }
 
         thr = self._edge_min(bool(c.asset))
+        exploring = bool(ctx.get("crypto", {}).get("exploring")) and ctx["crypto"].get("mode") == "explore-chart"
+        if exploring:
+            thr = self.s.explore_edge_min_cents
         snapshot["edge_min_cents"] = thr
         problems = []
         if thr >= 999:
-            problems.append("Learner has paused entries: no edge threshold made money on recent settled markets")
+            problems.append("Learner has paused entries: no edge threshold made money on recent settled markets"
+                            + ("" if not self.s.paper_mode else " (no chart model yet to explore with)"))
         elif best["edge"] < thr:
             problems.append(f"edge {best['edge']:.2f}c < {thr:g}c")
-        if score < self.s.edge_min_confidence:
-            problems.append(f"confidence {score} < {self.s.edge_min_confidence}")
+        min_conf = self.s.explore_min_confidence if exploring else self.s.edge_min_confidence
+        if score < min_conf:
+            problems.append(f"confidence {score} < {min_conf}")
         if dispersion > self.s.edge_max_book_dispersion:
             problems.append(f"books disagree (stdev {dispersion:.3f})")
         if upper < 1:
@@ -269,7 +328,9 @@ class EdgeFinder:
             return EdgeResult(None, why, diag)
 
         p = build()
+        tag = ("EXPLORE (paper only: Learner found no proven edge, so this trade tests the chart model). "
+               if exploring else "")
         p.add_verdict(self.name, Decision.APPROVE,
-                      f"edge {best['edge']:.2f}c after fees, confidence {score}. {story} "
+                      f"{tag}edge {best['edge']:.2f}c after fees, confidence {score}. {story} "
                       f"Upper bound {upper} contracts ({depth:g} resting at the ask).", snapshot)
         return EdgeResult(p, "proposed")

@@ -86,6 +86,7 @@ class SpotClient:
         self._lock = threading.Lock()
         self._quotes: dict[str, tuple[float, list[SpotQuote]]] = {}
         self._vol: dict[str, tuple[float, float]] = {}
+        self._closes: dict[str, dict[int, float]] = {}
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="spot")
 
     def _get(self, url: str, params: dict | None = None):
@@ -131,13 +132,25 @@ class SpotClient:
         if not sym:
             return None
         candles = self._get(f"https://api.exchange.coinbase.com/products/{sym}/candles", {"granularity": 60})
-        sig = sigma_from_candles(candles, self.s.crypto_vol_lookback_min)
+        # Drop the minute still in progress; keep completed 1-minute closes for chart features.
+        cutoff = int(now // 60) * 60 - 60
+        done = [c for c in candles if int(c[0]) <= cutoff]
+        with self._lock:
+            self._closes[asset] = {int(c[0]): float(c[4]) for c in done}
+        sig = sigma_from_candles(done or candles, self.s.crypto_vol_lookback_min)
         if sig is None:
             return None
         sig = max(sig, self.s.crypto_vol_floor_per_min / math.sqrt(60.0))
         with self._lock:
             self._vol[asset] = (now, sig)
         return sig
+
+
+    def closes(self, asset: str) -> dict[int, float]:
+        """Completed 1-minute Coinbase closes {minute start ts: close}, refreshed with sigma()."""
+        self.sigma(asset)
+        with self._lock:
+            return dict(self._closes.get(asset, {}))
 
 
 # ── Fair value for "average of the last 60 s >= strike" ──────────────────────

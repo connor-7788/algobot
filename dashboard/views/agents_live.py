@@ -23,6 +23,7 @@ QUIET_NOTE = {
     "risk_manager": "Quiet until Skeptic approves a trade.",
     "execution": "Quiet until Risk Manager approves a trade.",
     "learner": "Runs on the first engine cycle, then every 30 minutes.",
+    "shadow": "Reports when the first shadow trades settle (a minute after a 15-minute market closes).",
 }
 
 
@@ -75,8 +76,12 @@ def why_no_bets() -> None:
 @st.fragment(run_every=refresh)
 def board():
     rows = {r["agent"]: r for r in j.agent_statuses()}
-    top = st.columns(4)
-    for col, agent in zip(top, ["orchestrator", "scout", "monitor", "learner"]):
+    top = st.columns(3)
+    for col, agent in zip(top, ["orchestrator", "scout", "monitor"]):
+        with col:
+            card(agent, rows.get(agent))
+    learn = st.columns(2)
+    for col, agent in zip(learn, ["learner", "shadow"]):
         with col:
             card(agent, rows.get(agent))
     why_no_bets()

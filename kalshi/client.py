@@ -82,6 +82,13 @@ def parse_ts(value) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _float_or_none(v) -> float | None:
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class Market:
     ticker: str
@@ -104,6 +111,7 @@ class Market:
     cap_strike: float | None = None
     open_time: datetime | None = None
     rules_primary: str = ""
+    expiration_value: float | None = None        # settlement index value (crypto: 60 s BRTI average)
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -132,6 +140,7 @@ class Market:
             cap_strike=float(m["cap_strike"]) if m.get("cap_strike") not in (None, "") else None,
             open_time=parse_ts(m.get("open_time")),
             rules_primary=m.get("rules_primary", "") or "",
+            expiration_value=_float_or_none(m.get("expiration_value")),
             raw=m,
         )
 

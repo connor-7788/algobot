@@ -15,6 +15,7 @@ from kalshi.agents.execution import Execution
 from kalshi.agents.monitor import Monitor
 from kalshi.agents.risk_manager import RiskManager
 from kalshi.agents.scout import Scout
+from kalshi.agents.shadow import Shadow
 from kalshi.agents.skeptic import Skeptic
 from kalshi.client import KalshiDataClient
 from kalshi.history import MarketHistory
@@ -70,6 +71,8 @@ def build_orchestrator(settings) -> Orchestrator:
                                  f"auth={'yes' if signer else 'no'}")
     params = ParamStore(settings, journal)
     learner = Learner(settings, journal, data, params)
+    crypto = settings.market_focus == "crypto_15m"
+    shadow = Shadow(settings, journal, data) if (crypto and settings.shadow_enabled) else None
     p = params.get()
     log.info("learned params v%d (%s): sigma x%g, model weight %g, edge min %s", p.version, p.source,
              p.sigma_scale, p.model_weight, "PAUSED" if p.paused else p.edge_min_cents)
@@ -77,13 +80,14 @@ def build_orchestrator(settings) -> Orchestrator:
         settings,
         scout=Scout(settings, data, history),
         edge_finder=EdgeFinder(settings, odds, history, spot, params=params,
-                               learner=learner if settings.market_focus == "crypto_15m" else None),
+                               learner=learner if crypto else None, shadow=shadow),
         skeptic=Skeptic(settings, history, journal),
         risk=RiskManager(settings, journal, kill),
         execution=Execution(settings, journal, kill, data, http=http),
         monitor=Monitor(settings, journal, data),
         journal=journal,
-        learner=learner if settings.market_focus == "crypto_15m" else None,
+        learner=learner if crypto else None,
+        shadow=shadow,
     )
     orch.mark_feed = MarkFeed(settings, journal, data, on_tick=orch.run_exits)
     return orch

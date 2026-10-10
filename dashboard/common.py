@@ -25,6 +25,7 @@ AGENT_LABELS = {
     "execution": "Execution",
     "monitor": "Monitor",
     "learner": "Learner",
+    "shadow": "Shadow",
 }
 PIPELINE = list(AGENT_LABELS)
 

@@ -92,6 +92,14 @@ Render's free plan has no disk, so a deploy or restart empties the journal. To k
 
 Every change is versioned, logged to the journal and announced on the Agents Live page. Learner never touches Risk Manager's limits. Risk Manager learns one thing on its own: if the last 10 settled trades lost money in total, it halves the stake until the record recovers. Skeptic already refuses a series whose recent record is negative.
 
+## Chart model, paper exploration and shadow trades
+
+The Learner also reads each coin's own 1-minute chart (`kalshi/features.py`): momentum over 1, 3, 5 and 15 minutes, where price sits in its 15-minute range, distance from the strike in volatility units, and whether volatility is spiking. A small logistic regression (`kalshi/chart_model.py`) learns how those predict the outcome on top of Kalshi's price. It prices real decisions only after it beats Kalshi's price on newer markets it didn't train on. The Learning page shows what it has learned in words (for example "5-minute moves tend to continue").
+
+When the Learner pauses, paper mode keeps trading anyway (`paper_explore`): Edge Finder prices with the chart model, needs only 1c of edge, and tags the trade EXPLORE. Risk Manager sizes these at the stake floor. This never happens in live mode.
+
+Shadow (`kalshi/agents/shadow.py`) places pretend bets the bot wouldn't take: one per market for each of five strategies (chart, momentum, fade, favorite, underdog), at the ask plus the fee, with 2.5-10 minutes left. The bot's own fills are logged the same way as "bot". After each market settles, every bet gets a post-mortem: where price was against the strike at entry, what the chart said, where it settled, where it was near the end, and why it won or lost. Results are grouped by setup (ahead of / behind the strike, momentum with / against, price band), and Skeptic refuses a setup once it has lost money over 40+ trades with t <= -1. On startup the backfill replays these strategies on the last 72 hours, so the scoreboard starts with a few thousand trades.
+
 ## Why it doesn't bet often
 
 The Agents Live page shows a tally of Edge Finder's reasons for the last hour. In practice almost all of it is "edge too small after spread + fees": fair value leans 75% on Kalshi's own price (because the backtest showed Kalshi's price was the better forecast), so to find 3c of edge the model has to disagree with the market by roughly 20+ points after paying the half-spread, a 1c slippage cap and a ~1.7c fee. That rarely happens. Only three markets (BTC, ETH, SOL) are open at a time and each is traded at most once, so even with edge everywhere the ceiling is ~12 trades an hour.

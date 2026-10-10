@@ -160,7 +160,7 @@ class TestEdgeFinderUsesLearnedParams(unittest.TestCase):
         res = ef.evaluate(Candidate(btc_market(), book(), "", asset="BTC"))
         self.assertIsNotNone(res.proposal, res.reason)
         why = res.proposal.verdicts[0].reason
-        for bit in ("above the", "min left", "Model says YES", "Kalshi mid", "fee", "edge +", "need +3c"):
+        for bit in ("above the", "min left", "model says YES", "Kalshi mid", "fee", "edge +", "need +3c"):
             self.assertIn(bit, why)
 
     def test_records_observations(self):
@@ -260,8 +260,14 @@ class TestBackfill(unittest.TestCase):
 
         s = h.settings(market_focus="crypto_15m", crypto_series={"KXBTC15M": "BTC"}, learner_backfill_h=72)
         j = h.journal()
-        rep = backfill.run(s, j, Data(), session=Sess(), now=now, pause_s=0)
+        from kalshi.agents.shadow import Shadow
+        rep = backfill.run(s, j, Data(), session=Sess(), now=now, pause_s=0, shadow=Shadow(s, j))
         self.assertEqual(rep["errors"], [])
+        self.assertGreaterEqual(rep["shadow_trades"], 4)              # favorite + underdog on both markets
+        settled = j.shadow_rows()
+        self.assertEqual(len(settled), rep["shadow_trades"])
+        self.assertTrue(all(r["postmortem"] for r in settled))
+        self.assertTrue(all(r["feats"] for r in settled))
         self.assertEqual(rep["markets"], 2)
         rows = j.labeled_observations()
         self.assertEqual(len(rows), rep["observations"])

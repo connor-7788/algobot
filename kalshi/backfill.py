@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from kalshi.features import chart_features
 from kalshi.spot import SYMBOLS
 
 log = logging.getLogger("backfill")
@@ -68,12 +69,13 @@ def sigma_at(closes: dict[int, float], minute_ts: int, lookback: int, floor_per_
     return max(statistics.pstdev(rets), floor_per_min) / math.sqrt(60.0)
 
 
-def run(settings, journal, data, *, session=None, now=None, pause_s: float = 0.15) -> dict:
-    """Returns {"markets": n, "observations": n, "skipped": n, "errors": [...]}."""
+def run(settings, journal, data, *, session=None, now=None, pause_s: float = 0.15, shadow=None) -> dict:
+    """Returns {"markets": n, "observations": n, "shadow_trades": n, "skipped": n, "errors": [...]}.
+    With a Shadow agent, also replays its strategies on each settled market (with post-mortems)."""
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=settings.learner_backfill_h)
     have = journal.observed_tickers()
-    report = {"markets": 0, "observations": 0, "skipped": 0, "errors": []}
+    report = {"markets": 0, "observations": 0, "shadow_trades": 0, "skipped": 0, "errors": []}
 
     for series, asset in settings.crypto_series.items():
         sym = SYMBOLS.get(asset, {}).get("coinbase")
@@ -113,7 +115,7 @@ def run(settings, journal, data, *, session=None, now=None, pause_s: float = 0.1
             for m in chunk:
                 close_ts = int(m.close_time.timestamp())
                 y = 1 if m.result == "yes" else 0
-                rows = 0
+                rows = []
                 for c in candles.get(m.ticker, []):
                     t = int(c["end_period_ts"])
                     secs = close_ts - t
@@ -125,12 +127,20 @@ def run(settings, journal, data, *, session=None, now=None, pause_s: float = 0.1
                                    settings.crypto_vol_floor_per_min)
                     if not (bid and ask and 0 < bid < ask < 100 and spot and sig):
                         continue
+                    feats = chart_features(closes=closes, now_ts=t, spot=spot, strike=m.floor_strike,
+                                           secs_left=secs, sigma=sig, strike_type=m.strike_type, bid=bid, ask=ask)
                     journal.add_observation(ticker=m.ticker, series=series, close_ts=close_ts, secs_left=secs,
                                             spot=spot, strike=m.floor_strike, strike_type=m.strike_type,
-                                            sigma=sig, bid=bid, ask=ask, y=y)
-                    rows += 1
+                                            sigma=sig, bid=bid, ask=ask, y=y, feats=feats)
+                    rows.append({"secs_left": secs, "spot": spot, "strike": m.floor_strike,
+                                 "strike_type": m.strike_type, "bid": bid, "ask": ask, "feats": feats})
                 if rows:
                     report["markets"] += 1
-                    report["observations"] += rows
+                    report["observations"] += len(rows)
+                    if shadow is not None:
+                        try:
+                            report["shadow_trades"] += shadow.replay(m, rows)
+                        except Exception as e:
+                            report["errors"].append(f"shadow replay {m.ticker}: {e}")
             time.sleep(pause_s)
     return report

@@ -86,6 +86,7 @@ FOCUS_PRESETS = {
         "exec_order_timeout_s": 5.0,
         "timeout_execution_s": 20.0,
         "monitor_interval_s": 15.0,
+        "vol_cache_s": 15.0,                # chart features want fresh 1-minute closes
     },
     "sports_live": {},
 }
@@ -235,6 +236,25 @@ class Settings:
     learner_min_trades: int = 30                  # simulated trades needed on the older 70%
     learner_min_t: float = 1.0                    # newer 30% must be positive with t >= this
     timeout_learner_s: float = 120.0
+    learner_chart_l2: float = 2.0                 # ridge penalty for the chart model (bigger = more cautious)
+
+    # Paper exploration: when Learner pauses (no proven edge), paper mode keeps
+    # trading on the chart model's price so the bot learns from its own trades.
+    # Never applies in live mode.
+    paper_explore: bool = True
+    explore_edge_min_cents: float = 1.0
+    explore_min_confidence: int = 40
+
+    # Shadow trades: simulated bets the bot would not normally take, one per
+    # strategy per market, settled and explained afterwards. Never sent.
+    shadow_enabled: bool = True
+    shadow_strategies: tuple = ("chart", "momentum", "fade", "favorite", "underdog")
+    shadow_entry_max_secs: float = 600.0          # enter at the first look with <= 10 min left
+    shadow_entry_min_secs: float = 150.0
+    # Skeptic refuses setups (side of strike x momentum x price band) whose
+    # shadow + real record over >= N trades loses money with t <= -1.
+    skeptic_setup_min_n: int = 40
+    skeptic_setup_max_t: float = -1.0
     # On startup, rebuild learning data from the last N hours of settled
     # markets (Kalshi candles + Coinbase candles), so a deploy or restart on
     # the free plan doesn't make the agents forget. 0 disables.

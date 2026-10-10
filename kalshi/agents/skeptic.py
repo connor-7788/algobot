@@ -12,6 +12,11 @@ Checks, in order (first failure rejects):
   4. Losing record: this market type (series) has net negative realized P&L
      over its last skeptic_record_lookback settled trades, given at least
      skeptic_record_min_sample of them. Monitor writes these results.
+     (Skipped for paper exploration trades, whose job is to gather results.)
+  5. Losing setup (crypto): the trade's setup (ahead of / behind the strike x
+     momentum with / against x price band) has lost money over at least
+     skeptic_setup_min_n shadow and bot trades with t <= skeptic_setup_max_t.
+     This is learned from every simulated and real trade the bot has settled.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import logging
 from datetime import datetime, timezone
 
 from kalshi.agents.base import AgentDecision
+from kalshi.agents.shadow import setup_key, stats
 from kalshi.history import MarketHistory
 from kalshi.journal import Journal
 from kalshi.proposal import Agent, TradeProposal
@@ -80,15 +86,41 @@ class Skeptic:
                 f"{s.skeptic_max_fair_move*100:.0f} pts): too jumpy to trust",
                 fair_move=fair_move)
 
+        edge_snap = next((v.data_snapshot for v in p.verdicts if v.agent == Agent.EDGE_FINDER.value), {}) or {}
+        crypto = edge_snap.get("crypto") or {}
+        exploring = bool(crypto.get("exploring"))
+
         # 4. Losing record on this market type
         results = self.journal.market_type_results(p.series_ticker, s.skeptic_record_lookback)
         net = sum(results)
-        if len(results) >= s.skeptic_record_min_sample and net < 0:
+        if len(results) >= s.skeptic_record_min_sample and net < 0 and not exploring:
             wins = sum(1 for r in results if r > 0)
             return AgentDecision.reject(
                 f"{p.series_ticker} is {wins}-{len(results)-wins}, net ${net:.2f} over our last {len(results)} "
                 f"settled trades: sitting this series out until the record turns positive",
                 series=p.series_ticker, n=len(results), net_pnl=net)
+
+        # 5. Losing setup, learned from shadow + bot trades
+        setup_txt = ""
+        if crypto.get("feats"):
+            key = setup_key(crypto["feats"], p.side, p.price_cents)
+            try:
+                rows = [r for r in self.journal.shadow_rows(limit=5000)
+                        if r.get("feats") and setup_key(r["feats"], r["side"], r["entry_cents"]) == key]
+            except Exception as e:
+                log.debug("setup stats failed: %s", e)
+                rows = []
+            st = stats([float(r["pnl_cents"]) for r in rows])
+            if st["n"]:
+                setup_txt = (f", setup '{key}' {st['win_rate'] * 100:.0f}% wins over {st['n']} past trades "
+                             f"({st['avg_cents']:+.1f}c)")
+            if st["n"] >= s.skeptic_setup_min_n and st["avg_cents"] < 0 and st["t"] <= s.skeptic_setup_max_t:
+                return AgentDecision.reject(
+                    f"this setup keeps losing: '{key}' won {st['win_rate'] * 100:.0f}% of {st['n']} shadow and "
+                    f"bot trades, {st['avg_cents']:+.1f}c per contract (t {st['t']:.1f})",
+                    setup=key, **{k: v for k, v in st.items() if k != "n"}, setup_n=st["n"])
+        else:
+            setup_txt = ""
 
         record = (f"{p.series_ticker} record {sum(1 for r in results if r > 0)}-"
                   f"{sum(1 for r in results if r <= 0)} (${net:+.2f})" if results else
@@ -97,6 +129,6 @@ class Skeptic:
             f"checked and passed: book {book_age:.1f}s old (max {s.skeptic_max_data_age_s:.0f}s), "
             f"{len(names)} sources ({', '.join(sorted(names))}), ask moved {ask_move:.0f}c "
             f"(max {s.skeptic_max_line_move_cents:.0f}c), fair moved {fair_move*100:.1f} pts "
-            f"(max {s.skeptic_max_fair_move*100:.0f}), {record}",
+            f"(max {s.skeptic_max_fair_move*100:.0f}), {record}{setup_txt}",
             book_age_s=round(book_age, 1), sources=sorted(names), ask_move_cents=ask_move,
             fair_move=round(fair_move, 4), series_record_n=len(results), series_net_pnl=round(net, 2))
