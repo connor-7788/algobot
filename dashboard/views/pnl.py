@@ -126,7 +126,9 @@ def diverging_bars(df: pd.DataFrame, label: str, value: str, tooltip: list, heig
 st.title("P&L")
 st.caption(f"{'Paper trading' if s.paper_mode else 'LIVE trading'} on Kalshi {s.kalshi_env}, "
            f"{'15-minute crypto markets' if s.market_focus == 'crypto_15m' else 'live sports'}. "
-           f"Take-profit +{s.risk_take_profit_pct * 100:.0f}%, stop-loss -{s.risk_stop_loss_pct * 100:.0f}%. "
+           + (f"Take-profit +{s.risk_take_profit_pct * 100:.0f}%, stop-loss -{s.risk_stop_loss_pct * 100:.0f}%. "
+              if s.risk_exits_enabled else "Positions are held to settlement (take-profit/stop-loss off). ")
+           + 
            "Open positions are valued at what you'd get selling right now (your side's bid, minus the exit fee).")
 
 if "live_hist" not in st.session_state:

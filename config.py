@@ -174,6 +174,16 @@ class Settings:
     crypto_min_seconds_to_close: float = 75.0     # model needs T >= the 60 s averaging window
     crypto_vol_lookback_min: int = 60             # minutes of 1-min candles for volatility
     crypto_vol_floor_per_min: float = 0.0004      # never assume calmer than 0.04%/min
+    # Calibration from the Oct 2-10, 2026 backtest (2,400 settled BTC/ETH/SOL markets):
+    # the raw model was underconfident (said 70-80%, hit 83%), so volatility is
+    # scaled down; and Kalshi's own price was better calibrated than the model,
+    # so fair value leans mostly on the market (logit blend, model weight 0.25).
+    crypto_sigma_scale: float = 0.8
+    crypto_model_weight: float = 0.25
+    # Never buy contracts below this price: 10-35c contracts lost money in every
+    # time window of the backtest (long shots are overpriced on Kalshi).
+    edge_min_price_cents: int = 30
+    edge_max_price_cents: int = 97
     spot_cache_s: float = 2.0
     vol_cache_s: float = 30.0
 
@@ -198,7 +208,11 @@ class Settings:
     # (what you'd pocket selling at the bid after the exit fee, minus cost).
     risk_take_profit_pct: float = 0.25            # close at +25%
     risk_stop_loss_pct: float = 0.20              # close at -20%
-    risk_exits_enabled: bool = True
+    # Off by default: in the backtest, take-profit/stop-loss exits turned
+    # -3.3c/contract (hold to settlement) into -4.8c, because every exit pays
+    # the spread and another fee. Set True to re-enable.
+    risk_exits_enabled: bool = False
+    risk_one_entry_per_market: bool = True        # no re-entry after an exit in the same market
 
     # ── Execution ────────────────────────────────────────────────────────────
     exec_slippage_cap_cents: int = 1              # limit = observed ask + cap

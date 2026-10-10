@@ -107,6 +107,9 @@ class RiskManager:
         open_pos = [o for o in self.journal.open_positions() if o.proposal_id != p.proposal_id]
         if any(o.market_ticker == p.market_ticker for o in open_pos):
             return AgentDecision.reject(f"already holding {p.market_ticker}")
+        if s.risk_one_entry_per_market and p.market_ticker in self.journal.traded_tickers():
+            # Re-buying after a take-profit/stop-loss pays the spread and two fees again.
+            return AgentDecision.reject(f"already traded {p.market_ticker} (one entry per market)")
         if len(open_pos) >= s.risk_max_open_positions:
             return AgentDecision.reject(
                 f"{len(open_pos)} open positions, max {s.risk_max_open_positions}", open_positions=len(open_pos))

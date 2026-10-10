@@ -187,6 +187,14 @@ class Journal:
                 vals).fetchall()
         return [TradeProposal.from_dict(json.loads(r["payload"])) for r in rows]
 
+    def traded_tickers(self) -> set[str]:
+        """Markets where we already got filled (open, closed early, or settled)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT market_ticker FROM proposals WHERE filled_count > 0 AND paper=?",
+                (1 if self.paper else 0,)).fetchall()
+        return {r["market_ticker"] for r in rows}
+
     def open_positions(self) -> list[TradeProposal]:
         """Proposals holding a slot: approved, filled, or in an unknown state."""
         return self.by_status(OPEN_STATUSES)

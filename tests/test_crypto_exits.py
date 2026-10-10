@@ -97,7 +97,9 @@ class TestCryptoEdge(unittest.TestCase):
         self.assertIsNotNone(res.proposal, res.reason)
         p = res.proposal
         self.assertEqual(p.side, "yes")
-        self.assertGreater(p.fair_probability, 0.75)
+        # Blended toward the 51.5c market mid, but still well above it.
+        self.assertGreater(p.fair_probability, 0.65)
+        self.assertLess(p.fair_probability, 0.80)
         self.assertEqual({src.name for src in p.sources}, {"coinbase", "kraken", "bitstamp"})
         self.assertEqual(p.verdicts[0].data_snapshot["crypto"]["asset"], "BTC")
 
@@ -138,7 +140,7 @@ def pos(pnl_pct, bid=60, contracts=10):
 class TestExits(unittest.TestCase):
     def setUp(self):
         os.environ.pop("KILL_SWITCH", None)
-        self.s = h.settings(risk_take_profit_pct=0.25, risk_stop_loss_pct=0.20)
+        self.s = h.settings(risk_take_profit_pct=0.25, risk_stop_loss_pct=0.20, risk_exits_enabled=True)
         self.j = h.journal()
         self.risk = RiskManager(self.s, self.j, h.kill(self.s, self.j))
 
@@ -201,7 +203,7 @@ if __name__ == "__main__":
 class TestStopLossBaseline(unittest.TestCase):
     def test_fresh_cheap_position_does_not_stop_out(self):
         from kalshi.pnl import position_pnl
-        s = h.settings(risk_take_profit_pct=0.25, risk_stop_loss_pct=0.20)
+        s = h.settings(risk_take_profit_pct=0.25, risk_stop_loss_pct=0.20, risk_exits_enabled=True)
         j = h.journal()
         risk = RiskManager(s, j, h.kill(s, j))
         p = h.proposal(side="yes", price=33, count=2)
@@ -225,3 +227,23 @@ class TestStopLossBaseline(unittest.TestCase):
         q = h.fully_approved(side="no", price=57, count=5)
         q.verdicts[0].data_snapshot["book"] = {"yes_bid": 41, "yes_ask": 45}
         self.assertEqual(Execution(s, j, h.kill(s, j), None, None).execute(q).entry_bid_cents, 55.0)
+
+
+class TestBacktestFindings(unittest.TestCase):
+    def test_blend_leans_on_market(self):
+        from kalshi.agents.edge_finder import blend_with_market
+        self.assertAlmostEqual(blend_with_market(0.9, 0.5, 0.0), 0.5)
+        self.assertAlmostEqual(blend_with_market(0.9, 0.5, 1.0), 0.9, places=6)
+        mid = blend_with_market(0.9, 0.5, 0.25)
+        self.assertTrue(0.5 < mid < 0.7)
+
+    def test_never_buys_long_shots(self):
+        s = h.settings(market_focus="crypto_15m", edge_min_confidence=0, edge_min_price_cents=30, crypto_model_weight=1.0)
+        ef = EdgeFinder(s, None, MarketHistory(), FakeSpot(83150.0))
+        # Market prices YES at 10-12c while the model says ~90%: a huge "edge", but below the price floor.
+        res = ef.evaluate(Candidate(btc_market(), book(10, 12), "", asset="BTC"))
+        self.assertTrue(res.proposal is None or res.proposal.price_cents >= 30)
+
+    def test_exits_off_by_default(self):
+        from config import Settings
+        self.assertFalse(Settings().risk_exits_enabled)

@@ -41,6 +41,15 @@ class EdgeResult:
     diagnostic: TradeProposal | None = None   # a REJECTed proposal for the journal, if one could be built
 
 
+def blend_with_market(p_model: float, p_market: float, model_weight: float) -> float:
+    """Logit-space blend. model_weight 1.0 = model only, 0.0 = market only."""
+    def logit(p):
+        p = min(0.999, max(0.001, p))
+        return math.log(p / (1 - p))
+    x = model_weight * logit(p_model) + (1 - model_weight) * logit(p_market)
+    return 1 / (1 + math.exp(-x))
+
+
 class EdgeFinder:
     name = Agent.EDGE_FINDER.value
 
@@ -103,14 +112,19 @@ class EdgeFinder:
             return f"no {c.asset} spot quotes"
         if not sigma:
             return f"no {c.asset} volatility estimate"
+        bid, ask = c.book.best_bid_cents("yes"), c.book.best_ask_cents("yes")
+        if bid is None or ask is None:
+            return "no two-sided market to anchor fair value"
+        market_mid = (bid + ask) / 200.0
         sources = []
         for q in quotes:
-            p_above = prob_avg_at_or_above(q.price, m.floor_strike, secs, sigma)
+            p_above = prob_avg_at_or_above(q.price, m.floor_strike, secs, sigma * self.s.crypto_sigma_scale)
             if p_above is None:
                 return f"{secs:.0f}s left: inside the averaging window"
-            p_yes = p_above if m.strike_type in ("greater", "greater_or_equal") else 1.0 - p_above
+            p_model = p_above if m.strike_type in ("greater", "greater_or_equal") else 1.0 - p_above
+            p_yes = blend_with_market(p_model, market_mid, self.s.crypto_model_weight)
             sources.append(Source(name=q.source, probability=p_yes, fetched_at=q.fetched_at,
-                                  observed_at=q.observed_at, detail={"spot": q.price}))
+                                  observed_at=q.observed_at, detail={"spot": q.price, "model": round(p_model, 5)}))
         fair_yes, dispersion = consensus(sources)
         spot_mid = statistics.median(q.price for q in quotes)
         ctx = {"crypto": {"asset": c.asset, "spot": spot_mid, "strike": m.floor_strike,
@@ -131,7 +145,7 @@ class EdgeFinder:
         best = None
         for side in ("yes", "no"):
             ask = book.best_ask_cents(side)
-            if ask is None or not (1 <= ask <= 99):
+            if ask is None or not (self.s.edge_min_price_cents <= ask <= self.s.edge_max_price_cents):
                 continue
             fair_side = fair_yes if side == "yes" else 1.0 - fair_yes
             limit = min(99, ask + self.s.exec_slippage_cap_cents)

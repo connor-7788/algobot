@@ -175,3 +175,17 @@ class TestNeverIncreases(RiskTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneEntryPerMarket(RiskTestBase):
+    def test_no_reentry_after_exit(self):
+        p = h.open_position(self.j, "MKT-1", event="EV-1")
+        p.status = Status.CLOSED
+        self.j.save(p)
+        d = self.risk.review(h.proposal(ticker="MKT-1", event="EV-1"))
+        self.assertEqual(d.decision, Decision.REJECT)
+        self.assertIn("one entry per market", d.reason)
+
+    def test_unfilled_attempt_does_not_block(self):
+        h.open_position(self.j, "MKT-2", event="EV-2", count=0, status=Status.CANCELLED_UNFILLED)
+        self.assertNotEqual(self.risk.review(h.proposal(ticker="MKT-2", event="EV-2")).decision, Decision.REJECT)

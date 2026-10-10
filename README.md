@@ -68,7 +68,18 @@ Expect most scans to end in a PASS. These markets are traded hard by firms with 
 
 Set `MARKET_FOCUS=sports_live` to go back to live sports (that mode needs `ODDS_API_KEY`).
 
-## Take-profit and stop-loss
+## Backtest findings (Oct 2-10, 2026)
+
+2,400 settled BTC/ETH/SOL 15-minute markets with minute-by-minute Kalshi quotes and Coinbase prices, split into 5 days to fit and 3 days to test:
+
+* Kalshi's own price was better calibrated than the spot-price model (Brier 0.144 vs 0.150 on the test days). The raw model was underconfident, so it kept "finding" edge in long shots that the market priced correctly.
+* The original strategy lost 3.3c per contract over 2,132 trades (t = -3.4). Take-profit/stop-loss made it worse (-4.8c).
+* Contracts priced 10-35c lost money in every time window, in both periods.
+* Heavy favorites (90-97c) won 90-96% of the time but lost money over the first 5 days and made a little over the last 3: no consistent edge.
+
+So the bot now scales model volatility by 0.8, blends its probability with the market's (model weight 0.25), never buys below 30c, holds to settlement, and enters each market at most once. Expect it to trade rarely. That's the point: most of what it used to trade had negative expected value.
+
+## Take-profit and stop-loss (off by default)
 
 Every second, the mark feed reprices open positions and Risk Manager checks two limits on net P&L (selling at the bid, minus the exit fee, minus what you paid): `risk_take_profit_pct` (default +25%) and `risk_stop_loss_pct` (default 20% loss). When one hits, Execution sells the whole position. Live, that's an immediate-or-cancel, reduce-only limit order at the bid; in paper mode it simulates the sale at the bid. Exits count as realized P&L and show as CLOSED in the journal. Positions that hit neither limit are held to settlement. Turn exits off with `risk_exits_enabled = False`.
 
