@@ -205,3 +205,70 @@ class TestPassCategory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBackfill(unittest.TestCase):
+    def test_rebuilds_labelled_observations_from_history(self):
+        from datetime import datetime, timezone
+        from kalshi import backfill
+        from kalshi.client import Market
+
+        now = datetime.fromtimestamp(T0 + 7200, timezone.utc)
+        close = T0 + 3600
+        open_ = close - 900
+
+        def mkt(ticker, result, c):
+            return Market.from_api({
+                "ticker": ticker, "event_ticker": ticker[:-3], "title": "BTC up?", "status": "finalized",
+                "result": result, "close_time": datetime.fromtimestamp(c, timezone.utc).isoformat(),
+                "open_time": datetime.fromtimestamp(c - 900, timezone.utc).isoformat(),
+                "strike_type": "greater_or_equal", "floor_strike": 100.0}, "KXBTC15M")
+
+        class Data:
+            calls = []
+
+            def get_markets(self, series, status="open", max_pages=10):
+                return [mkt("KXBTC15M-A-00", "yes", close), mkt("KXBTC15M-B-00", "no", close - 900),
+                        mkt("KXBTC15M-OLD", "yes", T0 - 500 * 3600)]
+
+            def get_candlesticks(self, tickers, start, end, interval_min=1):
+                self.calls.append(tickers)
+                out = {}
+                for t in tickers:
+                    c = close if t.endswith("A-00") else close - 900
+                    out[t] = [{"end_period_ts": c - 60 * k, "yes_bid": {"close_dollars": "0.55"},
+                               "yes_ask": {"close_dollars": "0.57"}} for k in range(1, 15)]
+                return out
+
+        class Resp:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self.rows
+
+        class Sess:
+            def get(self, url, params=None, **kw):
+                st = int(datetime.fromisoformat(params["start"]).timestamp())
+                en = int(datetime.fromisoformat(params["end"]).timestamp())
+                assert (en - st) // 60 + 1 <= 300
+                return Resp([[t, 0, 0, 0, 100 * (1 + 0.0005 * math.sin(t / 60)), 0]
+                             for t in range(en - en % 60, st - 1, -60)])
+
+        s = h.settings(market_focus="crypto_15m", crypto_series={"KXBTC15M": "BTC"}, learner_backfill_h=72)
+        j = h.journal()
+        rep = backfill.run(s, j, Data(), session=Sess(), now=now, pause_s=0)
+        self.assertEqual(rep["errors"], [])
+        self.assertEqual(rep["markets"], 2)
+        rows = j.labeled_observations()
+        self.assertEqual(len(rows), rep["observations"])
+        self.assertGreater(len(rows), 20)
+        self.assertTrue(all(r["secs_left"] >= s.crypto_min_seconds_to_close for r in rows))
+        self.assertEqual({r["y"] for r in rows if r["ticker"].endswith("A-00")}, {1})
+        self.assertEqual({(r["bid"], r["ask"]) for r in rows}, {(55, 57)})
+        # Second run skips what it already has.
+        again = backfill.run(s, j, Data(), session=Sess(), now=now, pause_s=0)
+        self.assertEqual((again["markets"], again["skipped"]), (0, 2))

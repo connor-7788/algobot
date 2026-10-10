@@ -235,6 +235,10 @@ class Settings:
     learner_min_trades: int = 30                  # simulated trades needed on the older 70%
     learner_min_t: float = 1.0                    # newer 30% must be positive with t >= this
     timeout_learner_s: float = 120.0
+    # On startup, rebuild learning data from the last N hours of settled
+    # markets (Kalshi candles + Coinbase candles), so a deploy or restart on
+    # the free plan doesn't make the agents forget. 0 disables.
+    learner_backfill_h: float = 72.0
 
     # ── Keep-alive ───────────────────────────────────────────────────────────
     # Render's free plan stops a service after 15 minutes without inbound

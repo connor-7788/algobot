@@ -88,6 +88,8 @@ Every 30 minutes, once there are 1,500+ labelled examples (about 10 hours of mar
 * Calibration: it searches volatility scale 0.5-1.3 and model weight 0-0.75 on the older 70% of markets and only switches if the new values beat the current ones on the newer 30% (held-out log loss, by at least 0.002).
 * Entry threshold: it tries 3, 5, 8 and 12c minimum edge. A threshold is used only if it made money on the older 70% (30+ simulated trades) and also on the newer 30% (t >= 1). If none does, Edge Finder is paused until the evidence changes.
 
+Render's free plan has no disk, so a deploy or restart empties the journal. To keep the agents from forgetting, Learner rebuilds its memory on startup from public history (`kalshi/backfill.py`): the last 72 hours of settled BTC/ETH/SOL markets, Kalshi's 1-minute bid/ask candles and Coinbase's 1-minute prices, turned into the same labelled snapshots it records live (~10,000 of them, about a minute of downloading). Then it refits right away. Set `learner_backfill_h = 0` to turn this off.
+
 Every change is versioned, logged to the journal and announced on the Agents Live page. Learner never touches Risk Manager's limits. Risk Manager learns one thing on its own: if the last 10 settled trades lost money in total, it halves the stake until the record recovers. Skeptic already refuses a series whose recent record is negative.
 
 ## Why it doesn't bet often

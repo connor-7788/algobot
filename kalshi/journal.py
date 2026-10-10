@@ -378,14 +378,19 @@ class Journal:
     # ── Learner observations ─────────────────────────────────────────────────
 
     def add_observation(self, *, ticker, series, close_ts, secs_left, spot, strike, strike_type,
-                        sigma, bid, ask) -> None:
+                        sigma, bid, ask, y=None) -> None:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO observations (ticker, series, close_ts, secs_left, spot, strike, strike_type,"
-                " sigma, bid, ask, observed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " sigma, bid, ask, observed_at, y) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ticker, series, int(close_ts), float(secs_left), float(spot), float(strike), strike_type,
-                 float(sigma), bid, ask, _now()))
+                 float(sigma), bid, ask, _now(), y))
             self._conn.commit()
+
+    def observed_tickers(self) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute("SELECT DISTINCT ticker FROM observations").fetchall()
+        return {r[0] for r in rows}
 
     def unlabeled_tickers(self, before_ts: int) -> list[str]:
         with self._lock:

@@ -204,6 +204,17 @@ class KalshiDataClient:
                                                            "limit": max(len(tickers), 1)}, auth=False)
         return [Market.from_api(m) for m in data.get("markets", [])]
 
+    def get_candlesticks(self, tickers: list[str], start_ts: int, end_ts: int,
+                         interval_min: int = 1) -> dict[str, list[dict]]:
+        """Batch 1-minute candles: {ticker: [{end_period_ts, yes_bid{close_dollars..}, yes_ask{..}, ..}]}.
+        Kalshi caps one response at 10,000 candles; callers keep batches small."""
+        if not tickers:
+            return {}
+        data = self.http.request("GET", "/markets/candlesticks", auth=False, params={
+            "market_tickers": ",".join(tickers), "start_ts": int(start_ts), "end_ts": int(end_ts),
+            "period_interval": int(interval_min)})
+        return {m.get("market_ticker"): m.get("candlesticks") or [] for m in data.get("markets", [])}
+
     def get_market(self, ticker: str) -> Market:
         data = self.http.request("GET", f"/markets/{ticker}", auth=False)
         return Market.from_api(data.get("market", data))

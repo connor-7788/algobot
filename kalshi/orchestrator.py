@@ -109,6 +109,7 @@ class Orchestrator:
         self.learner = learner
         self._last_learn = 0.0
         self._learning = threading.Lock()
+        self._backfilled = False
         self._passes: deque = deque()           # (monotonic ts, category) for the last hour
 
     # ── Plumbing ─────────────────────────────────────────────────────────────
@@ -303,6 +304,22 @@ class Orchestrator:
         if not self._learning.acquire(blocking=False):
             return
         try:
+            if not self._backfilled and self.s.learner_backfill_h > 0:
+                self._backfilled = True
+                self.board.working(LEARNER, f"rebuilding memory from the last {self.s.learner_backfill_h:.0f}h "
+                                            "of settled markets")
+                try:
+                    from kalshi import backfill
+                    rep = backfill.run(self.s, self.journal, self.learner.data)
+                    msg = (f"loaded {rep['observations']:,} labelled snapshots from {rep['markets']} settled "
+                           f"markets ({rep['skipped']} already known)")
+                    if rep["errors"]:
+                        msg += f"; {len(rep['errors'])} problem(s): {rep['errors'][0]}"
+                    self.journal.log_event("learner", msg)
+                    self.board.said(LEARNER, "INFO", msg, detail=rep, activity="refitting")
+                except Exception as e:
+                    log.exception("backfill failed")
+                    self.board.said(LEARNER, "ERROR", f"history backfill failed, learning from live data only: {e}")
             self.board.working(LEARNER, "labelling settled markets and refitting")
             labelled = self.learner.label_pending()
             report = self.learner.refit()
