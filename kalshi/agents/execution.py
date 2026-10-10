@@ -135,6 +135,12 @@ class Execution:
         log.info("PAPER ORDER (not sent): %s", json.dumps(order))
         p.filled_count = p.contract_count
         p.avg_fill_price_cents = float(p.price_cents)          # simulated fill at the ask
+        edge = p.verdict_for(Agent.EDGE_FINDER.value)
+        book = (edge.data_snapshot.get("book") if edge else None) or {}
+        if p.side == "yes" and book.get("yes_bid") is not None:
+            p.entry_bid_cents = float(book["yes_bid"])
+        elif p.side == "no" and book.get("yes_ask") is not None:
+            p.entry_bid_cents = 100.0 - float(book["yes_ask"])
         p.fees_paid_usd = taker_fee_usd(p.price_cents, p.contract_count, self.s)
         p.order_id = f"paper-{p.proposal_id[:8]}"
         p.add_verdict(self.name, Decision.APPROVE,
@@ -157,6 +163,7 @@ class Execution:
             return self._refuse(p, f"ask moved to {ask}c, above limit {limit}c "
                                    f"(slippage cap {self.s.exec_slippage_cap_cents}c)", book=book.snapshot())
 
+        p.entry_bid_cents = book.best_bid_cents(p.side)
         log.info("LIVE ORDER: %s", json.dumps(order))
         try:
             res = self.orders.place_limit_order(ticker=p.market_ticker, side=p.side, price_cents=limit,

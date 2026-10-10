@@ -32,6 +32,17 @@ class PositionPnL:
     pnl_usd: float | None
     pnl_pct: float | None
     mark_age_s: float | None
+    baseline_pnl_usd: float | None = None   # P&L right after entry (spread + fees), stop-loss baseline
+
+    @property
+    def change_since_entry_pct(self) -> float | None:
+        """How far P&L has moved since entry, as a share of cost. A fresh
+        position is already down by the spread and fees; that isn't a loss
+        the stop-loss should react to."""
+        if self.pnl_usd is None or self.cost_usd <= 0:
+            return None
+        base = self.baseline_pnl_usd if self.baseline_pnl_usd is not None else 0.0
+        return (self.pnl_usd - base) / self.cost_usd
 
 
 def side_bid_cents(side: str, mark: dict | None) -> float | None:
@@ -56,9 +67,14 @@ def position_pnl(p: TradeProposal, mark: dict | None, settings, mark_age_s: floa
         value = n * bid / 100.0 - exit_fee
         pnl = value - cost
         pct = pnl / cost if cost > 0 else None
+    baseline = None
+    if p.entry_bid_cents is not None and n > 0:
+        eb = max(0, min(99, int(round(p.entry_bid_cents))))
+        eb_fee = taker_fee_usd(eb, n, settings) if 1 <= eb <= 99 else 0.0
+        baseline = round(n * p.entry_bid_cents / 100.0 - eb_fee - cost, 4)
     return PositionPnL(p.proposal_id, p.market_ticker, p.title, p.side, n, entry, bid,
                        round(cost, 4), None if value is None else round(value, 4),
-                       None if pnl is None else round(pnl, 4), pct, mark_age_s)
+                       None if pnl is None else round(pnl, 4), pct, mark_age_s, baseline)
 
 
 def held_positions(open_props: list[TradeProposal]) -> list[TradeProposal]:

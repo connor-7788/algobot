@@ -163,6 +163,7 @@ class TradeProposal:
 
     # Execution / Monitor results.
     original_count: int = 0
+    entry_bid_cents: float | None = None    # your side's bid right at entry (stop-loss baseline)
     order_id: str = ""
     filled_count: int = 0
     avg_fill_price_cents: float = 0.0

@@ -196,3 +196,32 @@ class TestExits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStopLossBaseline(unittest.TestCase):
+    def test_fresh_cheap_position_does_not_stop_out(self):
+        from kalshi.pnl import position_pnl
+        s = h.settings(risk_take_profit_pct=0.25, risk_stop_loss_pct=0.20)
+        j = h.journal()
+        risk = RiskManager(s, j, h.kill(s, j))
+        p = h.proposal(side="yes", price=33, count=2)
+        p.filled_count, p.avg_fill_price_cents, p.fees_paid_usd = 2, 33.0, 0.02
+        p.entry_bid_cents = 29.0                     # 4c spread at entry
+        fresh = position_pnl(p, {"yes_bid": 29, "yes_ask": 33}, s)
+        self.assertLess(fresh.pnl_pct, -0.15)          # already ~-20% on paper
+        self.assertEqual(risk.check_exits([fresh]), [])
+        dropped = position_pnl(p, {"yes_bid": 21, "yes_ask": 24}, s)
+        self.assertEqual(risk.check_exits([dropped])[0].kind, "STOP_LOSS")
+        up = position_pnl(p, {"yes_bid": 45, "yes_ask": 47}, s)
+        self.assertEqual(risk.check_exits([up])[0].kind, "TAKE_PROFIT")
+
+    def test_paper_fill_records_entry_bid(self):
+        j = h.journal()
+        s = h.settings()
+        p = h.fully_approved(side="yes", price=45, count=5)
+        p.verdicts[0].data_snapshot["book"] = {"yes_bid": 41, "yes_ask": 45}
+        out = Execution(s, j, h.kill(s, j), None, None).execute(p)
+        self.assertEqual(out.entry_bid_cents, 41.0)
+        q = h.fully_approved(side="no", price=57, count=5)
+        q.verdicts[0].data_snapshot["book"] = {"yes_bid": 41, "yes_ask": 45}
+        self.assertEqual(Execution(s, j, h.kill(s, j), None, None).execute(q).entry_bid_cents, 55.0)

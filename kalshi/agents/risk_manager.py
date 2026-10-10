@@ -14,9 +14,13 @@ Order of checks, first failure rejects:
 
 Outcome: REJECT, APPROVE (size unchanged), or MODIFY contract_count down.
 
-Exits (check_exits, run every second by the mark feed): close a position when
-its net P&L (sell at the bid, minus exit fee, minus cost) reaches
-+risk_take_profit_pct (take-profit) or -risk_stop_loss_pct (stop-loss).
+Exits (check_exits, run every second by the mark feed):
+  take-profit: net P&L (sell at the bid, minus exit fee, minus cost) reaches
+               +risk_take_profit_pct of cost. Real profit, after every cost.
+  stop-loss:   P&L has fallen risk_stop_loss_pct of cost below where it stood
+               right after entry. A fresh position already shows a loss equal
+               to the spread plus fees; measuring from zero would stop out
+               cheap contracts the moment they fill.
 It cannot raise size or touch side or price; TradeProposal.add_verdict would
 refuse that anyway.
 """
@@ -146,15 +150,17 @@ class RiskManager:
             bid = int(round(r.bid_cents))
             if not (1 <= bid <= 99):
                 continue
+            move = r.change_since_entry_pct
             if r.pnl_pct >= self.s.risk_take_profit_pct:
-                kind = "TAKE_PROFIT"
-            elif r.pnl_pct <= -self.s.risk_stop_loss_pct:
-                kind = "STOP_LOSS"
+                kind, shown, limit = "TAKE_PROFIT", r.pnl_pct, self.s.risk_take_profit_pct
+                desc = "net P&L"
+            elif move is not None and move <= -self.s.risk_stop_loss_pct:
+                kind, shown, limit = "STOP_LOSS", move, -self.s.risk_stop_loss_pct
+                desc = "since entry"
             else:
                 continue
-            limit = self.s.risk_take_profit_pct if kind == "TAKE_PROFIT" else -self.s.risk_stop_loss_pct
             out.append(ExitOrder(r.proposal_id, r.ticker, r.side, r.contracts, bid, kind,
                                  round(r.pnl_usd, 4), r.pnl_pct,
-                                 f"{kind.replace('_', ' ').lower()}: {r.pnl_pct * 100:+.1f}% "
+                                 f"{kind.replace('_', ' ').lower()}: {shown * 100:+.1f}% {desc} "
                                  f"(limit {limit * 100:+.0f}%), sell {r.contracts} @ {bid}c"))
         return out

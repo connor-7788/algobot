@@ -209,7 +209,9 @@ def live():
                        subset=["P&L", "Return"]))
         st.dataframe(styler, hide_index=True, use_container_width=True)
     else:
-        st.caption("Nothing open. The bot only trades games in progress, so positions show up during live games.")
+        st.caption("Nothing open right now." + (" New 15-minute markets open every quarter hour."
+                                                if s.market_focus == "crypto_15m" else
+                                                " The bot only trades games in progress."))
 
 
 live()
@@ -224,7 +226,7 @@ def history():
                if r["status"] in REALIZED and r["paper"] == (1 if s.paper_mode else 0)]
     if not settled:
         st.markdown("##### Equity curve")
-        st.info("No settled trades yet. Paper positions settle when their games end, then this fills in.")
+        st.info("No closed trades yet. Positions count here once they settle or hit take-profit / stop-loss.")
         return
     df = pd.DataFrame(settled)
     df["settled_at"] = pd.to_datetime(df["settled_at"], utc=True)
