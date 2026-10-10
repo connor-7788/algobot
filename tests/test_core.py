@@ -243,3 +243,41 @@ class TestImportBoundary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLivePnL(unittest.TestCase):
+    def test_yes_and_no_marks(self):
+        from kalshi.pnl import position_pnl, side_bid_cents
+        s = h.settings()
+        self.assertEqual(side_bid_cents("yes", {"yes_bid": 60, "yes_ask": 62}), 60)
+        self.assertEqual(side_bid_cents("no", {"yes_bid": 60, "yes_ask": 62}), 38)
+        p = h.proposal(side="yes", price=50, count=10)
+        p.filled_count, p.avg_fill_price_cents, p.fees_paid_usd = 10, 50.0, 0.18
+        up = position_pnl(p, {"yes_bid": 70, "yes_ask": 72}, s)
+        # value 10 * 0.70 - exit fee ceil_cent(0.07*10*.7*.3)=0.15 -> 6.85; cost 5.18
+        self.assertAlmostEqual(up.pnl_usd, 1.67, places=4)
+        self.assertGreater(up.pnl_pct, 0)
+        down = position_pnl(p, {"yes_bid": 30, "yes_ask": 32}, s)
+        self.assertLess(down.pnl_usd, 0)
+        self.assertIsNone(position_pnl(p, None, s).pnl_usd)
+
+    def test_mark_feed_writes_one_batch(self):
+        from kalshi.client import Market
+        from kalshi.marks import MarkFeed
+        from kalshi.proposal import Status
+        j = h.journal()
+        h.open_position(j, "T-A", count=5)
+        h.open_position(j, "T-B", count=5)
+        h.open_position(j, "T-C", count=0, status=Status.APPROVED)     # holds nothing: not marked
+        calls = []
+
+        class Data:
+            def get_markets_by_tickers(self, tickers):
+                calls.append(tickers)
+                return [Market.from_api({"ticker": t, "yes_bid_dollars": "0.4100", "yes_ask_dollars": "0.4300"})
+                        for t in tickers]
+
+        n = MarkFeed(h.settings(), j, Data()).tick()
+        self.assertEqual(n, 2)
+        self.assertEqual(calls, [["T-A", "T-B"]])
+        self.assertEqual(j.get_marks()["T-A"]["yes_ask"], 43)

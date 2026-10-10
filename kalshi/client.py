@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -72,6 +73,8 @@ def parse_ts(value) -> datetime | None:
         secs = value / 1000 if value > 1e11 else value
         return datetime.fromtimestamp(secs, tz=timezone.utc)
     s = str(value).replace("Z", "+00:00")
+    # Some sources send nanoseconds ("...39.282173995+00:00"); keep 6 digits.
+    s = re.sub(r"(\.\d{6})\d+", r"\1", s)
     try:
         dt = datetime.fromisoformat(s)
     except ValueError:
@@ -95,6 +98,11 @@ class Market:
     yes_bid_cents: int | None
     yes_ask_cents: int | None
     result: str
+    last_price_cents: float | None = None
+    strike_type: str = ""
+    floor_strike: float | None = None
+    cap_strike: float | None = None
+    open_time: datetime | None = None
     rules_primary: str = ""
     raw: dict = field(default_factory=dict, repr=False)
 
@@ -102,6 +110,7 @@ class Market:
     def from_api(cls, m: dict, series_ticker: str = "") -> "Market":
         yb = price_dollars(m, "yes_bid")
         ya = price_dollars(m, "yes_ask")
+        lp = price_dollars(m, "last_price")
         return cls(
             ticker=m.get("ticker", ""),
             event_ticker=m.get("event_ticker", ""),
@@ -117,6 +126,11 @@ class Market:
             yes_bid_cents=None if yb is None else int(math.floor(yb * 100)),
             yes_ask_cents=None if ya is None else int(math.ceil(ya * 100)),
             result=(m.get("result") or "").lower(),
+            last_price_cents=None if lp is None else float(lp * 100),
+            strike_type=(m.get("strike_type") or "").lower(),
+            floor_strike=float(m["floor_strike"]) if m.get("floor_strike") not in (None, "") else None,
+            cap_strike=float(m["cap_strike"]) if m.get("cap_strike") not in (None, "") else None,
+            open_time=parse_ts(m.get("open_time")),
             rules_primary=m.get("rules_primary", "") or "",
             raw=m,
         )
@@ -180,6 +194,15 @@ class KalshiDataClient:
             if not cursor:
                 break
         return markets
+
+    def get_markets_by_tickers(self, tickers: list[str]) -> list[Market]:
+        """One request for many markets (GET /markets?tickers=a,b,c). Used by the
+        1-second mark feed so live P&L costs one call regardless of position count."""
+        if not tickers:
+            return []
+        data = self.http.request("GET", "/markets", params={"tickers": ",".join(tickers),
+                                                           "limit": max(len(tickers), 1)}, auth=False)
+        return [Market.from_api(m) for m in data.get("markets", [])]
 
     def get_market(self, ticker: str) -> Market:
         data = self.http.request("GET", f"/markets/{ticker}", auth=False)

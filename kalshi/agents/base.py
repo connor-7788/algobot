@@ -35,4 +35,5 @@ class Candidate:
     book: Book
     sport_key: str
     opponent: str = ""            # yes_sub_title of the other market in the same event
+    asset: str = ""               # crypto 15m markets: "BTC", "ETH", ...
     scanned_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

@@ -28,6 +28,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from kalshi.agents.base import AgentDecision
+from kalshi.pnl import held_positions, position_pnl
 from kalshi.proposal import Agent, Decision, ProposalClosed, ScopeViolation, Status, TradeProposal
 from kalshi.status import StatusBoard
 
@@ -73,6 +74,8 @@ class Orchestrator:
         self.board = StatusBoard(journal)
         self.pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="agent")
         self._last_monitor = 0.0
+        # Monitor (settlement) and exits (mark feed thread) both close positions.
+        self.position_lock = threading.Lock()
         self._cycle_no = 0
         self.last_cycle: CycleStats | None = None
 
@@ -192,10 +195,39 @@ class Orchestrator:
 
     # ── Cycle ────────────────────────────────────────────────────────────────
 
+    def run_exits(self) -> int:
+        """Called every second by the mark feed: Risk checks take-profit /
+        stop-loss on live prices, Execution closes what Risk flags."""
+        if not self.s.risk_exits_enabled:
+            return 0
+        closed = 0
+        with self.position_lock:
+            marks = self.journal.get_marks()
+            # Only markets still trading: a closed market's last bid is stale and can't be sold into.
+            rows = [position_pnl(p, marks.get(p.market_ticker), self.s)
+                    for p in held_positions(self.journal.open_positions())
+                    if (marks.get(p.market_ticker) or {}).get("status") in ("active", "open")]
+            for order in self.risk.check_exits(rows):
+                self.board.said(RISK, "INFO", f"{order.ticker} {order.side.upper()}: {order.reason}",
+                                ticker=order.ticker, detail={"kind": order.kind, "pnl_usd": order.pnl_usd})
+                self.board.working(EXEC, f"closing {order.ticker} ({order.kind.lower()})", order.ticker)
+                try:
+                    p = self.execution.close_position(order)
+                except Exception as e:
+                    log.exception("exit failed for %s", order.ticker)
+                    self.board.said(EXEC, "ERROR", f"exit {order.ticker} failed: {e}", ticker=order.ticker)
+                    continue
+                if p is not None:
+                    closed += 1
+                    self.board.said(EXEC, "APPROVE", f"{order.ticker}: {p.verdicts[-1].reason}",
+                                    ticker=order.ticker, detail=p.verdicts[-1].data_snapshot)
+        return closed
+
     def run_monitor(self) -> None:
         self.board.working(MONITOR, "checking open positions for settlement")
         try:
-            rep = self._call(self.monitor.run_once, self.s.timeout_monitor_s)
+            with self.position_lock:
+                rep = self._call(self.monitor.run_once, self.s.timeout_monitor_s)
         except Exception as e:
             log.warning("monitor failed: %s", e)
             self.board.said(MONITOR, "ERROR", f"monitor failed: {e}")

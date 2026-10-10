@@ -71,7 +71,8 @@ class Monitor:
             if not m.is_settled:
                 continue
             p.result = m.result
-            p.realized_pnl_usd = realized_pnl(p, m.result)
+            # Add to anything already realized by a partial take-profit/stop-loss exit.
+            p.realized_pnl_usd = round((p.realized_pnl_usd or 0.0) + realized_pnl(p, m.result), 4)
             p.settled_at = now
             p.status = Status.SETTLED
             self.journal.save(p)

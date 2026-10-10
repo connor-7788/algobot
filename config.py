@@ -61,9 +61,40 @@ DEFAULT_SPORT_SERIES = {
 }
 
 
+# 15-minute "up or down" series (verified live Oct 10, 2026: fee_type quadratic,
+# multiplier 1, settle on CF Benchmarks' real-time index averaged over the
+# final 60 seconds vs the average over the 60 seconds before the open).
+DEFAULT_CRYPTO_SERIES = {
+    "KXBTC15M": "BTC",
+    "KXETH15M": "ETH",
+    "KXSOL15M": "SOL",
+}
+
+# Thresholds that depend on what the bot trades. load_settings() applies the
+# preset for MARKET_FOCUS on top of the defaults below.
+FOCUS_PRESETS = {
+    "crypto_15m": {
+        "scan_interval_s": 5.0,             # a whole market lasts 15 minutes
+        "timeout_scout_s": 4.0,
+        "timeout_edge_s": 4.0,
+        "edge_confirm_window_s": 30.0,
+        "skeptic_max_data_age_s": 10.0,     # spot older than 10 s is stale
+        "skeptic_max_line_age_s": 30.0,     # an exchange print older than 30 s
+        "skeptic_line_window_s": 30.0,
+        "skeptic_max_line_move_cents": 8.0,
+        "skeptic_max_fair_move": 0.10,
+        "exec_order_timeout_s": 5.0,
+        "timeout_execution_s": 20.0,
+        "monitor_interval_s": 15.0,
+    },
+    "sports_live": {},
+}
+
+
 @dataclass(frozen=True)
 class Settings:
     # ── Deploy switches ──────────────────────────────────────────────────────
+    market_focus: str = "sports_live"             # "crypto_15m" or "sports_live" (env MARKET_FOCUS)
     paper_mode: bool = True
     kill_switch_env: bool = False
     kalshi_env: str = "demo"                      # "demo" | "prod"
@@ -138,6 +169,14 @@ class Settings:
     scout_live_lookahead_h: float = 4.0           # Scout keeps markets whose occurrence time is within
     scout_live_lookback_h: float = 3.0            #   [now - lookback, now + lookahead] (occurrence ~= kickoff + 3h)
 
+    # ── Crypto 15-minute markets ─────────────────────────────────────────────
+    crypto_series: dict = field(default_factory=lambda: dict(DEFAULT_CRYPTO_SERIES))
+    crypto_min_seconds_to_close: float = 75.0     # model needs T >= the 60 s averaging window
+    crypto_vol_lookback_min: int = 60             # minutes of 1-min candles for volatility
+    crypto_vol_floor_per_min: float = 0.0004      # never assume calmer than 0.04%/min
+    spot_cache_s: float = 2.0
+    vol_cache_s: float = 30.0
+
     # ── Skeptic ──────────────────────────────────────────────────────────────
     skeptic_max_data_age_s: float = 60.0          # live: a minute-old price is already old
     skeptic_line_window_s: float = 120.0
@@ -155,6 +194,11 @@ class Settings:
     risk_max_open_positions: int = 10
     risk_max_event_exposure_usd: float = 40.00
     risk_daily_loss_limit_usd: float = 30.00
+    # Exits, checked every second against live prices. Measured on net P&L
+    # (what you'd pocket selling at the bid after the exit fee, minus cost).
+    risk_take_profit_pct: float = 0.25            # close at +25%
+    risk_stop_loss_pct: float = 0.20              # close at -20%
+    risk_exits_enabled: bool = True
 
     # ── Execution ────────────────────────────────────────────────────────────
     exec_slippage_cap_cents: int = 1              # limit = observed ask + cap
@@ -163,6 +207,7 @@ class Settings:
 
     # ── Monitor ──────────────────────────────────────────────────────────────
     monitor_interval_s: float = 60.0
+    marks_interval_s: float = 1.0                 # live prices for open positions (one request per tick)
 
     # ── Storage / dashboard ──────────────────────────────────────────────────
     journal_db_path: str = "data/journal.db"
@@ -183,7 +228,11 @@ class Settings:
 def load_settings(dotenv_path: str = ".env") -> Settings:
     _load_dotenv(dotenv_path)
     pem = os.getenv("KALSHI_PRIVATE_KEY_CONTENT", "").replace("\\n", "\n").strip()
-    return Settings(
+    focus = os.getenv("MARKET_FOCUS", "crypto_15m").strip().lower()
+    if focus not in FOCUS_PRESETS:
+        raise ValueError(f"MARKET_FOCUS must be one of {list(FOCUS_PRESETS)}")
+    base = Settings(market_focus=focus, **FOCUS_PRESETS[focus])
+    return replace(base,
         paper_mode=_env_bool("PAPER_MODE", True),
         kill_switch_env=_env_bool("KILL_SWITCH", False),
         kalshi_env=os.getenv("KALSHI_ENV", "demo").strip().lower(),

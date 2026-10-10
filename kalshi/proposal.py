@@ -39,10 +39,14 @@ class Status(str, Enum):
     CANCELLED_UNFILLED = "CANCELLED_UNFILLED"
     UNCERTAIN = "UNCERTAIN"                  # order state unknown, Monitor must reconcile
     SETTLED = "SETTLED"
+    CLOSED = "CLOSED"                        # exited early (take-profit / stop-loss)
 
 
 # Statuses that occupy a position slot for Risk.
 OPEN_STATUSES = {Status.APPROVED, Status.PAPER_FILLED, Status.OPEN, Status.UNCERTAIN}
+
+# Statuses whose P&L is booked (held to settlement, or exited early).
+REALIZED_STATUSES = {Status.SETTLED, Status.CLOSED}
 
 
 class Agent(str, Enum):

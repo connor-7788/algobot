@@ -7,10 +7,8 @@ import json
 import pandas as pd
 import streamlit as st
 
-from common import AGENT_LABELS, get_journal, sidebar
+from common import AGENT_LABELS, get_journal
 
-st.set_page_config(page_title="Journal", layout="wide")
-sidebar()
 j = get_journal()
 
 st.title("Trade journal")
@@ -26,6 +24,7 @@ df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
 df["rejected_by"] = df["rejected_by"].fillna("")
 df["outcome"] = df.apply(
     lambda r: (f"settled {r['result']} ${r['realized_pnl_usd']:+.2f}" if r["status"] == "SETTLED"
+               else f"exited ${r['realized_pnl_usd']:+.2f}" if r["status"] == "CLOSED"
                else r["status"]), axis=1)
 
 # ── Who kills the most trades ────────────────────────────────────────────────

@@ -13,6 +13,10 @@ Order of checks, first failure rejects:
   6. Per-event exposure: open cost in the same event + this trade <= cap
 
 Outcome: REJECT, APPROVE (size unchanged), or MODIFY contract_count down.
+
+Exits (check_exits, run every second by the mark feed): close a position when
+its net P&L (sell at the bid, minus exit fee, minus cost) reaches
++risk_take_profit_pct (take-profit) or -risk_stop_loss_pct (stop-loss).
 It cannot raise size or touch side or price; TradeProposal.add_verdict would
 refuse that anyway.
 """
@@ -21,15 +25,32 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from kalshi.agents.base import AgentDecision
 from kalshi.journal import Journal
 from kalshi.killswitch import KillSwitch
+from kalshi.pnl import PositionPnL
 from kalshi.proposal import Agent, Decision, TradeProposal
 
 log = logging.getLogger("agent.risk")
+
+
+@dataclass(frozen=True)
+class ExitOrder:
+    """Created only by RiskManager.check_exits; Execution.close_position
+    refuses anything else."""
+    proposal_id: str
+    ticker: str
+    side: str
+    contracts: int
+    bid_cents: int
+    kind: str                 # "TAKE_PROFIT" | "STOP_LOSS"
+    pnl_usd: float
+    pnl_pct: float
+    reason: str
 
 
 class RiskManager:
@@ -112,3 +133,28 @@ class RiskManager:
         return AgentDecision(Decision.MODIFY,
                              f"sized {p.contract_count} -> {new_count} (binding: {binding})",
                              snap, {"contract_count": new_count})
+
+    # ── Exits ────────────────────────────────────────────────────────────────
+
+    def check_exits(self, positions: list[PositionPnL]) -> list[ExitOrder]:
+        if not self.s.risk_exits_enabled:
+            return []
+        out = []
+        for r in positions:
+            if r.pnl_pct is None or r.bid_cents is None or r.contracts <= 0:
+                continue
+            bid = int(round(r.bid_cents))
+            if not (1 <= bid <= 99):
+                continue
+            if r.pnl_pct >= self.s.risk_take_profit_pct:
+                kind = "TAKE_PROFIT"
+            elif r.pnl_pct <= -self.s.risk_stop_loss_pct:
+                kind = "STOP_LOSS"
+            else:
+                continue
+            limit = self.s.risk_take_profit_pct if kind == "TAKE_PROFIT" else -self.s.risk_stop_loss_pct
+            out.append(ExitOrder(r.proposal_id, r.ticker, r.side, r.contracts, bid, kind,
+                                 round(r.pnl_usd, 4), r.pnl_pct,
+                                 f"{kind.replace('_', ' ').lower()}: {r.pnl_pct * 100:+.1f}% "
+                                 f"(limit {limit * 100:+.0f}%), sell {r.contracts} @ {bid}c"))
+        return out

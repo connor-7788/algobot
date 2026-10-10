@@ -36,6 +36,61 @@ class Scout:
         return -self.s.scout_live_lookback_h <= hours <= self.s.scout_live_lookahead_h
 
     def scan(self) -> list[Candidate]:
+        if self.s.market_focus == "crypto_15m":
+            return self.scan_crypto()
+        return self.scan_sports()
+
+    def scan_crypto(self) -> list[Candidate]:
+        """15-minute up/down markets: one open market per coin at a time."""
+        now = datetime.now(timezone.utc)
+        out: list[Candidate] = []
+        stats = {"markets": 0, "closing_soon": 0, "no_strike": 0, "no_book": 0,
+                 "wide_spread": 0, "thin": 0, "passed": 0, "errors": 0}
+        for series, asset in self.s.crypto_series.items():
+            try:
+                markets = self.data.get_markets(series, status="open", max_pages=1)
+            except Exception as e:
+                stats["errors"] += 1
+                log.warning("get_markets %s failed: %s", series, e)
+                continue
+            if not markets and series not in self._warned_empty:
+                self._warned_empty.add(series)
+                log.warning("series %s returned 0 open markets", series)
+            stats["markets"] += len(markets)
+            for m in markets:
+                if m.status and m.status not in ("active", "open"):
+                    continue
+                if m.close_time is None or (m.close_time - now).total_seconds() < self.s.crypto_min_seconds_to_close:
+                    stats["closing_soon"] += 1
+                    continue
+                if m.floor_strike is None or m.strike_type not in ("greater", "greater_or_equal", "less", "less_or_equal"):
+                    stats["no_strike"] += 1
+                    continue
+                try:
+                    book = self.data.get_orderbook(m.ticker, depth=self.s.scout_orderbook_depth)
+                except Exception as e:
+                    stats["errors"] += 1
+                    log.debug("orderbook %s failed: %s", m.ticker, e)
+                    continue
+                self.history.record_ask(m.ticker, "yes", book.best_ask_cents("yes"))
+                self.history.record_ask(m.ticker, "no", book.best_ask_cents("no"))
+                spread = book.spread_cents()
+                if spread is None:
+                    stats["no_book"] += 1
+                    continue
+                if spread > self.s.scout_max_spread_cents:
+                    stats["wide_spread"] += 1
+                    continue
+                if max(book.ask_depth("yes"), book.ask_depth("no")) < self.s.scout_min_ask_depth:
+                    stats["thin"] += 1
+                    continue
+                stats["passed"] += 1
+                out.append(Candidate(market=m, book=book, sport_key="", asset=asset, scanned_at=now))
+        self.last_stats = stats
+        log.info("scout: %s", stats)
+        return out
+
+    def scan_sports(self) -> list[Candidate]:
         now = datetime.now(timezone.utc)
         out: list[Candidate] = []
         stats = {"markets": 0, "closing_soon": 0, "not_live_window": 0, "low_volume": 0, "no_book": 0,

@@ -15,7 +15,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from kalshi.proposal import OPEN_STATUSES, Status, TradeProposal
+from kalshi.proposal import OPEN_STATUSES, REALIZED_STATUSES, Status, TradeProposal
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS proposals (
@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS agent_feed (
 );
 CREATE INDEX IF NOT EXISTS ix_feed_agent ON agent_feed(agent, id);
 
+CREATE TABLE IF NOT EXISTS marks (
+    ticker     TEXT PRIMARY KEY,
+    yes_bid    REAL,
+    yes_ask    REAL,
+    last_price REAL,
+    status     TEXT,
+    result     TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     ts      TEXT NOT NULL,
@@ -101,6 +111,8 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 class Journal:
+    _realized = tuple(sorted(st.value for st in REALIZED_STATUSES))
+
     def __init__(self, path: str, paper: bool = True):
         self.path = path
         self.paper = paper
@@ -185,24 +197,24 @@ class Journal:
         with self._lock:
             r = self._conn.execute(
                 "SELECT COALESCE(SUM(realized_pnl_usd), 0) AS s FROM proposals "
-                "WHERE status=? AND paper=?", (Status.SETTLED.value, 1 if self.paper else 0)).fetchone()
+                "WHERE status IN (?, ?) AND paper=?", (*self._realized, 1 if self.paper else 0)).fetchone()
         return float(r["s"])
 
     def realized_pnl_since(self, since: datetime) -> float:
         with self._lock:
             r = self._conn.execute(
                 "SELECT COALESCE(SUM(realized_pnl_usd), 0) AS s FROM proposals "
-                "WHERE status=? AND paper=? AND settled_at >= ?",
-                (Status.SETTLED.value, 1 if self.paper else 0, _iso(since))).fetchone()
+                "WHERE status IN (?, ?) AND paper=? AND settled_at >= ?",
+                (*self._realized, 1 if self.paper else 0, _iso(since))).fetchone()
         return float(r["s"])
 
     def market_type_results(self, series_ticker: str, limit: int) -> list[float]:
         """Realized P&L of the most recent settled trades in a series, newest first."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT realized_pnl_usd FROM proposals WHERE status=? AND series_ticker=? "
+                "SELECT realized_pnl_usd FROM proposals WHERE status IN (?, ?) AND series_ticker=? "
                 "AND paper=? ORDER BY settled_at DESC LIMIT ?",
-                (Status.SETTLED.value, series_ticker, 1 if self.paper else 0, limit)).fetchall()
+                (*self._realized, series_ticker, 1 if self.paper else 0, limit)).fetchall()
         return [float(r["realized_pnl_usd"] or 0.0) for r in rows]
 
     # ── Dashboard reads ──────────────────────────────────────────────────────
@@ -283,6 +295,27 @@ class Journal:
                 rows = self._conn.execute("SELECT * FROM agent_feed ORDER BY id DESC LIMIT ?",
                                           (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    # ── Live marks (written by MarkFeed every second, read by the P&L page) ──
+
+    def upsert_marks(self, marks: list[dict]) -> None:
+        if not marks:
+            return
+        now = _now()
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO marks (ticker, yes_bid, yes_ask, last_price, status, result, updated_at) "
+                "VALUES (:ticker, :yes_bid, :yes_ask, :last_price, :status, :result, :updated_at) "
+                "ON CONFLICT(ticker) DO UPDATE SET yes_bid=excluded.yes_bid, yes_ask=excluded.yes_ask, "
+                "last_price=excluded.last_price, status=excluded.status, result=excluded.result, "
+                "updated_at=excluded.updated_at",
+                [dict(m, updated_at=now) for m in marks])
+            self._conn.commit()
+
+    def get_marks(self) -> dict[str, dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM marks").fetchall()
+        return {r["ticker"]: dict(r) for r in rows}
 
     def log_event(self, kind: str, message: str, level: str = "INFO") -> None:
         with self._lock:

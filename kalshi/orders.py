@@ -121,3 +121,23 @@ class KalshiOrderClient:
             if (o.get("client_order_id") or "") == client_order_id:
                 return normalize_order(o)
         return None
+
+
+    def place_exit_order(self, *, ticker: str, side: str, bid_cents: int, count: int,
+                         client_order_id: str) -> PlaceResult:
+        """Sell `count` contracts of `side` at no less than bid_cents, immediately
+        or cancel, reduce-only (V2 only accepts reduce_only with IOC). Selling
+        YES is an "ask" at the YES price; selling NO is a "bid" for YES at 100 - bid."""
+        if side == "yes":
+            book_side, yes_price = "ask", f"{Decimal(bid_cents) / 100:.4f}"
+        else:
+            book_side, yes_price = "bid", f"{Decimal(100 - bid_cents) / 100:.4f}"
+        body = {
+            "ticker": ticker, "client_order_id": client_order_id, "side": book_side,
+            "count": str(int(count)), "price": yes_price, "time_in_force": "immediate_or_cancel",
+            "reduce_only": True, "self_trade_prevention_type": self.settings.self_trade_prevention_type,
+        }
+        log.info("EXIT %s", body)
+        data = self.http.request("POST", "/portfolio/events/orders", body=body, write=True)
+        return PlaceResult(data.get("order_id", ""), client_order_id, int(count_value(data, "fill_count")),
+                           int(count_value(data, "remaining_count")), None, None)

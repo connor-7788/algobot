@@ -1,14 +1,12 @@
-"""Live view: what each agent is doing and saying right now. Refreshes itself."""
+"""Agents Live page (routed from app.py). Live view: what each agent is doing and saying right now. Refreshes itself."""
 
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
 
-from common import AGENT_LABELS, PIPELINE, ago, get_journal, get_settings, seconds_since, sidebar
+from common import AGENT_LABELS, PIPELINE, ago, get_journal, get_settings, seconds_since
 
-st.set_page_config(page_title="Agents Live", layout="wide")
-sidebar()
 s = get_settings()
 j = get_journal()
 

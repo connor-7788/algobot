@@ -25,11 +25,14 @@ import logging
 import time
 
 from kalshi.client import KalshiDataClient
+from kalshi.agents.risk_manager import ExitOrder
 from kalshi.fees import taker_fee_usd
 from kalshi.http import KalshiError, KalshiTransportError
 from kalshi.journal import Journal
 from kalshi.killswitch import KillSwitch
 from kalshi.orders import KalshiOrderClient, to_v2_side_and_price
+from datetime import datetime, timezone
+
 from kalshi.proposal import Agent, Decision, Status, TradeProposal
 
 log = logging.getLogger("agent.execution")
@@ -270,5 +273,51 @@ class Execution:
         p.status = Status.OPEN if found.fill_count > 0 else Status.CANCELLED_UNFILLED
         self.journal.log_event("reconcile", f"{p.proposal_id}: resolved to {p.status.value} "
                                             f"({found.fill_count} filled)")
+        self.journal.save(p)
+        return p
+
+    # ── Exits (take-profit / stop-loss from Risk) ────────────────────────────
+
+    def close_position(self, order: ExitOrder) -> TradeProposal | None:
+        if not isinstance(order, ExitOrder):
+            raise TypeError("close_position only accepts an ExitOrder from RiskManager.check_exits")
+        p = self.journal.get(order.proposal_id)
+        if p is None or p.status not in (Status.OPEN, Status.PAPER_FILLED) or p.filled_count <= 0:
+            return None
+        n = min(order.contracts, p.filled_count)
+        if self.s.paper_mode:
+            sold, price = n, order.bid_cents
+            log.info("PAPER EXIT (not sent): sell %d %s %s @ %dc [%s]", n, p.side.upper(),
+                     p.market_ticker, price, order.kind)
+        else:
+            if self.orders is None:
+                return None
+            res = self.orders.place_exit_order(ticker=p.market_ticker, side=p.side, bid_cents=order.bid_cents,
+                                               count=n, client_order_id=f"{p.proposal_id[:24]}-x{int(time.time())}")
+            sold, price = res.fill_count, order.bid_cents        # IOC at >= bid: worst case is the bid
+            if sold <= 0:
+                log.info("exit IOC for %s filled nothing at %dc", p.market_ticker, price)
+                return None
+
+        entry = float(p.avg_fill_price_cents or p.price_cents)
+        entry_fee_part = (p.fees_paid_usd or 0.0) * sold / p.filled_count
+        exit_fee = taker_fee_usd(price, sold, self.s)
+        pnl = sold * (price - entry) / 100.0 - entry_fee_part - exit_fee
+        snap = {"kind": order.kind, "sold": sold, "price_cents": price, "exit_fee_usd": exit_fee,
+                "pnl_usd": round(pnl, 4), "paper": self.s.paper_mode}
+        p.add_verdict(Agent.RISK.value, Decision.APPROVE, f"EXIT {order.reason}", {"exit": order.kind})
+        p.add_verdict(self.name, Decision.APPROVE,
+                      f"closed {sold} @ {price}c ({order.kind.replace('_', ' ').lower()}), P&L ${pnl:+.2f}", snap)
+        prior = p.realized_pnl_usd or 0.0
+        if sold >= p.filled_count:
+            p.status = Status.CLOSED
+            p.realized_pnl_usd = round(prior + pnl, 4)
+            p.settled_at = datetime.now(timezone.utc)
+        else:
+            # Partial: book the sold part as a separate closed record would be cleaner, but
+            # keeping one row per trade, we shrink the open size and carry realized P&L.
+            p.fees_paid_usd = (p.fees_paid_usd or 0.0) - entry_fee_part
+            p.filled_count -= sold
+            p.realized_pnl_usd = round(prior + pnl, 4)
         self.journal.save(p)
         return p

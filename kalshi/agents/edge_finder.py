@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -27,7 +28,8 @@ from kalshi.confidence import confidence_score
 from kalshi.fees import worst_case_fee_per_contract_cents
 from kalshi.history import MarketHistory
 from kalshi.odds_api import OddsAPIClient, consensus, match_market
-from kalshi.proposal import Agent, Decision, TradeProposal
+from kalshi.proposal import Agent, Decision, Source, TradeProposal
+from kalshi.spot import prob_avg_at_or_above
 
 log = logging.getLogger("agent.edge_finder")
 
@@ -42,41 +44,88 @@ class EdgeResult:
 class EdgeFinder:
     name = Agent.EDGE_FINDER.value
 
-    def __init__(self, settings, odds: OddsAPIClient, history: MarketHistory):
+    def __init__(self, settings, odds: OddsAPIClient, history: MarketHistory, spot=None):
         self.s = settings
         self.odds = odds
         self.history = history
+        self.spot = spot            # SpotClient for crypto 15m markets
 
-    def evaluate(self, c: Candidate) -> EdgeResult:
-        m, book = c.market, c.book
+    # ── Fair value: sports (devigged sportsbook consensus) ───────────────────
+
+    def _fair_sports(self, c: Candidate):
+        m = c.market
         yes_name = m.yes_sub_title or m.title
         try:
             events = self.odds.events(c.sport_key)
         except Exception as e:
-            return EdgeResult(None, f"odds fetch failed: {e}")
+            return f"odds fetch failed: {e}"
         start = m.occurrence_time or m.expected_expiration_time
         match = match_market(yes_name, c.opponent, start, events, self.s.match_max_start_diff_h, m.title)
         if match is None:
-            return EdgeResult(None, f"no unambiguous sportsbook match for {yes_name} vs {c.opponent or '?'}")
+            return f"no unambiguous sportsbook match for {yes_name} vs {c.opponent or '?'}"
         event, team = match
         now = datetime.now(timezone.utc)
         phase = self.s.edge_game_phase
         if event.commence_time is None:
-            return EdgeResult(None, "sportsbook event has no start time")
+            return "sportsbook event has no start time"
         started = event.commence_time <= now
         if phase == "live_only":
             if not started:
-                return EdgeResult(None, f"not live yet (starts {event.commence_time:%m-%d %H:%M} UTC)")
+                return f"not live yet (starts {event.commence_time:%m-%d %H:%M} UTC)"
             age_h = (now - event.commence_time).total_seconds() / 3600
             if age_h > self.s.edge_max_game_age_h:
-                return EdgeResult(None, f"game started {age_h:.1f}h ago, likely over")
+                return f"game started {age_h:.1f}h ago, likely over"
         elif phase == "pregame_only" and started:
-            return EdgeResult(None, "event already started")
-
+            return "event already started"
         sources = event.sources_for(team)
         if not sources:
-            return EdgeResult(None, "matched event has no usable lines")
+            return "matched event has no usable lines"
         fair_yes, dispersion = consensus(sources)
+        ctx = {"matched_event": {"id": event.event_id, "home": event.home_team, "away": event.away_team,
+                                 "commence": event.commence_time.isoformat() if event.commence_time else None,
+                                 "yes_team": team}}
+        return sources, fair_yes, dispersion, ctx
+
+    # ── Fair value: crypto 15m (spot vs strike, short-term volatility) ────────
+
+    def _fair_crypto(self, c: Candidate):
+        m = c.market
+        if self.spot is None:
+            return "no spot price client configured"
+        now = datetime.now(timezone.utc)
+        secs = (m.close_time - now).total_seconds() if m.close_time else 0
+        try:
+            quotes = self.spot.quotes(c.asset)
+            sigma = self.spot.sigma(c.asset)
+        except Exception as e:
+            return f"spot/vol fetch failed: {e}"
+        if not quotes:
+            return f"no {c.asset} spot quotes"
+        if not sigma:
+            return f"no {c.asset} volatility estimate"
+        sources = []
+        for q in quotes:
+            p_above = prob_avg_at_or_above(q.price, m.floor_strike, secs, sigma)
+            if p_above is None:
+                return f"{secs:.0f}s left: inside the averaging window"
+            p_yes = p_above if m.strike_type in ("greater", "greater_or_equal") else 1.0 - p_above
+            sources.append(Source(name=q.source, probability=p_yes, fetched_at=q.fetched_at,
+                                  observed_at=q.observed_at, detail={"spot": q.price}))
+        fair_yes, dispersion = consensus(sources)
+        spot_mid = statistics.median(q.price for q in quotes)
+        ctx = {"crypto": {"asset": c.asset, "spot": spot_mid, "strike": m.floor_strike,
+                          "strike_type": m.strike_type, "seconds_left": round(secs, 1),
+                          "sigma_per_min": round(sigma * 60 ** 0.5, 6),
+                          "move_needed_pct": round((m.floor_strike / spot_mid - 1) * 100, 4)}}
+        return sources, fair_yes, dispersion, ctx
+
+    def evaluate(self, c: Candidate) -> EdgeResult:
+        m, book = c.market, c.book
+        yes_name = m.yes_sub_title or m.title
+        fair = self._fair_crypto(c) if c.asset else self._fair_sports(c)
+        if isinstance(fair, str):
+            return EdgeResult(None, fair)
+        sources, fair_yes, dispersion, ctx = fair
         self.history.record_fair(m.ticker, fair_yes)
 
         best = None
@@ -111,9 +160,7 @@ class EdgeFinder:
             "book_dispersion": round(dispersion, 5), "n_books": len(sources),
             "confidence": score, "confidence_parts": parts, "confirmations": confirmations,
             "ask_depth": depth, "contract_count": upper, "book": book.snapshot(),
-            "matched_event": {"id": event.event_id, "home": event.home_team, "away": event.away_team,
-                              "commence": event.commence_time.isoformat() if event.commence_time else None,
-                              "yes_team": team},
+            **ctx,
         }
 
         problems = []

@@ -43,7 +43,8 @@ Same names your old Render service used, plus a few new ones.
 | `KALSHI_API_KEY` | | API key ID |
 | `KALSHI_PRIVATE_KEY_CONTENT` | | PEM text; literal `\n` is fine |
 | `KALSHI_PRIVATE_KEY_PATH` | | Alternative to the above (Render secret file) |
-| `ODDS_API_KEY` | | the-odds-api.com; without it Edge Finder finds nothing |
+| `MARKET_FOCUS` | `crypto_15m` | `crypto_15m` or `sports_live` |
+| `ODDS_API_KEY` | | the-odds-api.com; only needed for `sports_live` |
 | `JOURNAL_DB_PATH` | `data/journal.db` | Put it on a persistent disk in production |
 | `DASHBOARD_PASSWORD` | | If set, required to flip the kill switch |
 
@@ -57,7 +58,21 @@ python launch.py                 # dashboard on http://localhost:10000
 python -m unittest discover -s tests -t .
 ```
 
-## Live games only
+## What it trades: 15-minute crypto markets (default)
+
+`MARKET_FOCUS` (env var, default `crypto_15m`) picks the market set. The default trades Kalshi's 15-minute up/down markets for BTC, ETH and SOL (`KXBTC15M`, `KXETH15M`, `KXSOL15M`). Each one asks whether the coin's CF Benchmarks index, averaged over the final 60 seconds, ends at or above the average from the 60 seconds before it opened. A new market opens every 15 minutes, around the clock.
+
+Fair value comes from live spot prices on Coinbase, Kraken and Bitstamp (three of the exchanges the index is built from) and the last hour of 1-minute volatility: the probability that the price clears the strike in the time left, treating the final 60-second average correctly. Each exchange counts as a separate source, so Skeptic still requires two that agree. The bot scans every 5 seconds and stops opening trades 75 seconds before the close.
+
+Expect most scans to end in a PASS. These markets are traded hard by firms with faster feeds than this bot, so a 3c edge after fees doesn't show up often.
+
+Set `MARKET_FOCUS=sports_live` to go back to live sports (that mode needs `ODDS_API_KEY`).
+
+## Take-profit and stop-loss
+
+Every second, the mark feed reprices open positions and Risk Manager checks two limits on net P&L (selling at the bid, minus the exit fee, minus what you paid): `risk_take_profit_pct` (default +25%) and `risk_stop_loss_pct` (default 20% loss). When one hits, Execution sells the whole position. Live, that's an immediate-or-cancel, reduce-only limit order at the bid; in paper mode it simulates the sale at the bid. Exits count as realized P&L and show as CLOSED in the journal. Positions that hit neither limit are held to settlement. Turn exits off with `risk_exits_enabled = False`.
+
+## Live games only (sports mode)
 
 `edge_game_phase` in `config.py` is `live_only`. Scout only fetches books for games near or in progress, and Edge Finder passes on anything that hasn't kicked off or started more than 4.5 hours ago. Set it to `pregame_only` or `both` to change that.
 
