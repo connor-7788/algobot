@@ -36,9 +36,10 @@ st.markdown(f"""
 <style>
 .pnl-tile {{ border: 1px solid rgba(128,128,128,.25); border-radius: 12px; padding: 14px 16px; height: 100%; }}
 .pnl-tile .lbl {{ font-size: .80rem; opacity: .75; letter-spacing: .02em; }}
-.pnl-tile .val {{ font-size: 1.85rem; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.25; margin-top: 2px; }}
+.pnl-tile .val {{ font-size: clamp(1.05rem, 2.1vw, 1.85rem); font-weight: 650; font-variant-numeric: tabular-nums;
+                   line-height: 1.25; margin-top: 2px; white-space: nowrap; }}
 .pnl-tile .sub {{ font-size: .80rem; opacity: .7; margin-top: 2px; font-variant-numeric: tabular-nums; }}
-.pnl-tile.hero .val {{ font-size: 2.4rem; }}
+.pnl-tile.hero .val {{ font-size: clamp(1.3rem, 2.8vw, 2.4rem); }}
 .live-dot {{ display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px;
              background:{GREEN}; animation: pulse 1.2s ease-in-out infinite; vertical-align: middle; }}
 .live-dot.stale {{ background:{MUTED}; animation:none; }}
@@ -67,6 +68,16 @@ def pct(v: float | None) -> str:
     if v is None:
         return ""
     return f"{'+' if v >= 0 else '-'}{abs(v) * 100:.1f}%"
+
+
+def short_name(ticker: str) -> str:
+    """KXBTC15M-26OCT101900-00 -> "BTC 19:00"; KXNFLGAME-26OCT11DALNYG-DAL -> "DAL"."""
+    parts = ticker.split("-")
+    series = parts[0]
+    if series.endswith("15M") and len(parts) >= 2:
+        asset = series[2:-3] if series.startswith("KX") else series[:-3]
+        return f"{asset} {parts[1][-4:-2]}:{parts[1][-2:]}"
+    return parts[-1]
 
 
 def tile(label: str, value: float | None, sub: str = "", hero: bool = False, text: str | None = None) -> str:
@@ -181,7 +192,7 @@ def live():
     with right:
         st.markdown("##### By position")
         if priced:
-            bdf = pd.DataFrame([{"label": f"{r.ticker.split('-')[-1]} {r.side.upper()}", "pnl": r.pnl_usd,
+            bdf = pd.DataFrame([{"label": f"{short_name(r.ticker)} {r.side.upper()}", "pnl": r.pnl_usd,
                                  "_label": money(r.pnl_usd), "market": r.title or r.ticker,
                                  "pct": pct(r.pnl_pct)} for r in priced])
             st.altair_chart(diverging_bars(bdf, "label", "pnl",
@@ -233,7 +244,7 @@ def history():
     df = df.sort_values("settled_at")
     df["pnl"] = df["realized_pnl_usd"].fillna(0.0)
     df["cum"] = df["pnl"].cumsum()
-    df["trade"] = df["market_ticker"].str.split("-").str[-1] + " " + df["side"].str.upper()
+    df["trade"] = df["market_ticker"].map(short_name) + " " + df["side"].str.upper()
 
     st.markdown("##### Equity curve (realized)")
     st.altair_chart(signed_area(df, "settled_at", "cum", "Cumulative P&L ($)", 280,
