@@ -34,4 +34,5 @@ class Candidate:
     market: Market
     book: Book
     sport_key: str
+    opponent: str = ""            # yes_sub_title of the other market in the same event
     scanned_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

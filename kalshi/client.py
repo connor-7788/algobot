@@ -162,10 +162,10 @@ class KalshiDataClient:
     def __init__(self, http: KalshiHTTP):
         self.http = http
 
-    def _auth(self) -> bool:
-        return self.http.authenticated
-
     # ── Market data ──────────────────────────────────────────────────────────
+    # Public endpoints, sent unsigned (confirmed Oct 10, 2026: /markets and
+    # /series answer without auth headers). That lets paper mode read prod
+    # prices with a demo key, since a demo key signing a prod request gets 401.
 
     def get_markets(self, series_ticker: str, status: str = "open", max_pages: int = 10) -> list[Market]:
         markets: list[Market] = []
@@ -174,7 +174,7 @@ class KalshiDataClient:
             params = {"series_ticker": series_ticker, "status": status, "limit": 200}
             if cursor:
                 params["cursor"] = cursor
-            data = self.http.request("GET", "/markets", params=params, auth=self._auth())
+            data = self.http.request("GET", "/markets", params=params, auth=False)
             markets.extend(Market.from_api(m, series_ticker) for m in data.get("markets", []))
             cursor = data.get("cursor") or ""
             if not cursor:
@@ -182,16 +182,16 @@ class KalshiDataClient:
         return markets
 
     def get_market(self, ticker: str) -> Market:
-        data = self.http.request("GET", f"/markets/{ticker}", auth=self._auth())
+        data = self.http.request("GET", f"/markets/{ticker}", auth=False)
         return Market.from_api(data.get("market", data))
 
     def get_event(self, event_ticker: str) -> dict:
-        data = self.http.request("GET", f"/events/{event_ticker}", auth=self._auth())
+        data = self.http.request("GET", f"/events/{event_ticker}", auth=False)
         return data.get("event", data)
 
     def get_orderbook(self, ticker: str, depth: int = 10) -> Book:
         data = self.http.request("GET", f"/markets/{ticker}/orderbook",
-                                 params={"depth": depth}, auth=self._auth())
+                                 params={"depth": depth}, auth=False)
         return parse_orderbook(ticker, data)
 
     # ── Portfolio (read-only, needs credentials) ─────────────────────────────

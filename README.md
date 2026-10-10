@@ -39,7 +39,7 @@ Same names your old Render service used, plus a few new ones.
 |---|---|---|
 | `PAPER_MODE` | `true` | `false` sends real orders |
 | `KILL_SWITCH` | `false` | `true` stops all new trading; the dashboard toggle can't override it |
-| `KALSHI_ENV` | `demo` | `demo` or `prod` |
+| `KALSHI_ENV` | `demo` | `prod` recommended for paper mode (real prices, nothing sent); live trading on prod needs a prod key |
 | `KALSHI_API_KEY` | | API key ID |
 | `KALSHI_PRIVATE_KEY_CONTENT` | | PEM text; literal `\n` is fine |
 | `KALSHI_PRIVATE_KEY_PATH` | | Alternative to the above (Render secret file) |
@@ -56,6 +56,18 @@ pip install -r requirements.txt
 python launch.py                 # dashboard on http://localhost:10000
 python -m unittest discover -s tests -t .
 ```
+
+## Live games only
+
+`edge_game_phase` in `config.py` is `live_only`. Scout only fetches books for games near or in progress, and Edge Finder passes on anything that hasn't kicked off or started more than 4.5 hours ago. Set it to `pregame_only` or `both` to change that.
+
+Live pricing is where stale data costs the most, so the freshness limits are tight: the bot scans every 30 s, refreshes sportsbook odds every 30 s, and Skeptic kills any trade whose inputs are over 60 s old, whose sportsbook line hasn't updated in 2 minutes (usually a suspended line), or whose Kalshi price moved 5c or more in the last 2 minutes. Expect Skeptic to kill most live proposals. Orders that don't fill within 15 s are cancelled.
+
+Odds API cost: about 2 credits a minute for each sport with a game in progress, and nothing for sports with no live games.
+
+## Paper mode on real prices
+
+Market data (markets, order books) is public, so the bot reads it without signing. That lets paper mode run on `KALSHI_ENV=prod` with real prices even though your key is a demo key. Demo prices are thin and often stale, which makes paper results there meaningless. Signed calls (balance, positions, orders) only happen in live mode, and a demo key on prod fails at startup instead of trading.
 
 ## How each rule works
 
@@ -88,7 +100,7 @@ The kill switch toggle is in the sidebar on every page.
 1. Let paper mode run long enough to see settled results in the journal. Paper fills at the ask are optimistic: real limit orders don't always fill.
 2. Check `KALSHI_ENV`. Demo keys only work on demo, prod keys only on prod.
 3. Verify the NO-side mapping with one contract in demo. Kalshi's V2 order API uses a single YES book, so buying NO at 40c is sent as selling YES at 60c. The docs support this, but confirm the resulting position shows as NO before trusting it with size.
-4. Check the Scout log at startup for "returned 0 open markets". That means a series ticker in `config.sport_series` is wrong.
+4. Make a prod API key at kalshi.com (Account, API keys) and put its ID and PEM in Render. Your current key is a demo key.
 5. Watch Odds API credits. Each `/odds` call costs credits; `odds_cache_s` controls how often each sport is refreshed.
 
 ## Render notes

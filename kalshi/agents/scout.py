@@ -25,10 +25,20 @@ class Scout:
         self._warned_empty: set[str] = set()
         self.last_stats: dict = {}
 
+    def _in_live_window(self, m, now) -> bool:
+        """Cheap pre-filter so we don't fetch books for games days away. Kalshi's
+        occurrence_datetime sits ~3h after kickoff; Edge Finder does the exact
+        "has it started" check against the sportsbook's kickoff time."""
+        t = m.occurrence_time or m.expected_expiration_time
+        if t is None:
+            return False
+        hours = (t - now).total_seconds() / 3600
+        return -self.s.scout_live_lookback_h <= hours <= self.s.scout_live_lookahead_h
+
     def scan(self) -> list[Candidate]:
         now = datetime.now(timezone.utc)
         out: list[Candidate] = []
-        stats = {"markets": 0, "closing_soon": 0, "low_volume": 0, "no_book": 0,
+        stats = {"markets": 0, "closing_soon": 0, "not_live_window": 0, "low_volume": 0, "no_book": 0,
                  "wide_spread": 0, "thin": 0, "passed": 0, "errors": 0}
         for series, sport_key in self.s.sport_series.items():
             try:
@@ -41,6 +51,11 @@ class Scout:
                 self._warned_empty.add(series)
                 log.warning("series %s returned 0 open markets; check the ticker in config.sport_series", series)
             stats["markets"] += len(markets)
+            # Kalshi game events hold one market per team ("Washington wins",
+            # "San Francisco wins"), so the sibling's yes_sub_title is the opponent.
+            by_event: dict[str, list[str]] = {}
+            for m in markets:
+                by_event.setdefault(m.event_ticker, []).append(m.yes_sub_title)
 
             # Cheap filters on market fields first, so we only fetch books we might use.
             shortlist = []
@@ -49,6 +64,9 @@ class Scout:
                     continue
                 if m.close_time is None or (m.close_time - now).total_seconds() < self.s.scout_min_minutes_to_close * 60:
                     stats["closing_soon"] += 1
+                    continue
+                if self.s.edge_game_phase == "live_only" and not self._in_live_window(m, now):
+                    stats["not_live_window"] += 1
                     continue
                 if m.volume_24h < self.s.scout_min_volume_24h:
                     stats["low_volume"] += 1
@@ -77,7 +95,10 @@ class Scout:
                     stats["thin"] += 1
                     continue
                 stats["passed"] += 1
-                out.append(Candidate(market=m, book=book, sport_key=sport_key, scanned_at=now))
+                others = [n for n in by_event.get(m.event_ticker, []) if n != m.yes_sub_title]
+                opponent = others[0] if len(others) == 1 else ""
+                out.append(Candidate(market=m, book=book, sport_key=sport_key, opponent=opponent,
+                                     scanned_at=now))
         self.last_stats = stats
         log.info("scout: %s", stats)
         return out

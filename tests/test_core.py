@@ -141,16 +141,33 @@ class TestOdds(unittest.TestCase):
             ]}]
         events = parse_odds_events(payload, "americanfootball_nfl", fetched_at=h.NOW)
         self.assertEqual(len(events[0].lines), 2)
-        start = datetime(2026, 10, 11, 17, 0, tzinfo=timezone.utc)
-        hit = match_market("Dallas", "Dallas at New York G Winner?", start, events, 36)
+        # Kalshi's occurrence_datetime sits ~3h after kickoff.
+        occurrence = datetime(2026, 10, 11, 20, 0, tzinfo=timezone.utc)
+        hit = match_market("Dallas", "New York G", occurrence, events, 8)
         self.assertIsNotNone(hit)
         ev, team = hit
         self.assertEqual(team, "Dallas Cowboys")
+        self.assertIsNone(match_market("Dallas", "New York J", occurrence, events, 8))   # wrong opponent
+        self.assertIsNone(match_market("Dallas", "", occurrence, events, 8, "Dallas wins"))  # can't confirm game
+        self.assertIsNotNone(match_market("Dallas", "", occurrence, events, 8, "Dallas at New York G"))
         mean, sd = consensus(ev.sources_for(team))
         self.assertTrue(0.6 < mean < 0.65)
         self.assertGreater(sd, 0)
 
+    def test_back_to_back_games_not_confused(self):
+        def ev(day):
+            return {"id": f"g{day}", "commence_time": f"2026-10-{day}T23:05:00Z", "home_team": "New York Yankees",
+                    "away_team": "Toronto Blue Jays", "bookmakers": [{"key": "pinnacle", "markets": [
+                        {"key": "h2h", "outcomes": [{"name": "New York Yankees", "price": -120},
+                                                    {"name": "Toronto Blue Jays", "price": 110}]}]}]}
+        events = parse_odds_events([ev(11), ev(12)], "baseball_mlb", fetched_at=h.NOW)
+        occurrence = datetime(2026, 10, 12, 2, 5, tzinfo=timezone.utc)    # game of the 11th, +3h
+        ev_hit, _ = match_market("New York Y", "Toronto", occurrence, events, 8)
+        self.assertEqual(ev_hit.event_id, "g11")
+
     def test_team_name_variants(self):
+        self.assertEqual(team_match_score("Los Angeles C", "Los Angeles Chargers"), 1.0)
+        self.assertEqual(team_match_score("Los Angeles R", "Los Angeles Chargers"), 0.0)
         self.assertEqual(team_match_score("New York G", "New York Giants"), 1.0)
         self.assertEqual(team_match_score("New York G", "New York Jets"), 0.0)
         self.assertEqual(team_match_score("Cowboys", "Dallas Cowboys"), 1.0)

@@ -49,9 +49,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 # Kalshi series ticker -> the-odds-api sport key.
-# VERIFY: these series tickers are my best knowledge of Kalshi's single-game
-# winner series as of Oct 2026. Scout logs any series that returns zero open
-# markets at startup, which is the signal that a ticker here is wrong.
+# Verified against GET /series?category=Sports on Oct 10, 2026: all five exist,
+# all are fee_type quadratic_with_maker_fees (multiplier 1, except KXMLBGAME 0.5).
+# Scout logs any series with zero open markets (off-season or a renamed ticker).
 DEFAULT_SPORT_SERIES = {
     "KXNFLGAME": "americanfootball_nfl",
     "KXNCAAFGAME": "americanfootball_ncaaf",
@@ -102,12 +102,12 @@ class Settings:
     fee_balance_precision: float = 0.01
 
     # ── Orchestrator ─────────────────────────────────────────────────────────
-    scan_interval_s: float = 60.0
-    timeout_scout_s: float = 45.0
+    scan_interval_s: float = 30.0                 # live prices move; scan often
+    timeout_scout_s: float = 25.0
     timeout_edge_s: float = 20.0
     timeout_skeptic_s: float = 5.0
     timeout_risk_s: float = 5.0
-    timeout_execution_s: float = 90.0
+    timeout_execution_s: float = 45.0
     timeout_monitor_s: float = 45.0
     journal_edge_rejects: bool = False            # also journal candidates Edge Finder passed on
 
@@ -124,25 +124,29 @@ class Settings:
     odds_api_base: str = "https://api.the-odds-api.com/v4"
     odds_api_key: str = ""
     odds_bookmakers: str = "pinnacle,fanduel,draftkings,betmgm,williamhill_us"
-    odds_cache_s: float = 120.0                   # each call spends Odds API credits
+    odds_cache_s: float = 30.0                    # 1 Odds API credit per call; only sports with live candidates are fetched
     edge_min_cents: float = 3.0                   # after fees and slippage cap
     edge_min_confidence: int = 60                 # confidence model score, 0-100
     edge_max_book_dispersion: float = 0.04        # max stdev of devigged probs across books
-    edge_confirm_window_s: float = 300.0
+    edge_confirm_window_s: float = 120.0
     edge_max_contracts: int = 500                 # hard ceiling on the proposal's upper bound
     edge_max_depth_take: float = 0.5              # never propose more than this share of ask depth
-    match_max_start_diff_h: float = 36.0          # Kalshi vs sportsbook start time tolerance
-    edge_skip_in_play: bool = True                # pregame only; in-play lines move too fast
+    match_max_start_diff_h: float = 8.0           # |Kalshi occurrence time - book kickoff|; occurrence is ~3h after kickoff
+    # Which games to trade: "live_only" (in progress), "pregame_only", or "both".
+    edge_game_phase: str = "live_only"
+    edge_max_game_age_h: float = 4.5              # past this since kickoff, assume it's over / in OT chaos
+    scout_live_lookahead_h: float = 4.0           # Scout keeps markets whose occurrence time is within
+    scout_live_lookback_h: float = 3.0            #   [now - lookback, now + lookahead] (occurrence ~= kickoff + 3h)
 
     # ── Skeptic ──────────────────────────────────────────────────────────────
-    skeptic_max_data_age_s: float = 180.0
-    skeptic_line_window_s: float = 300.0
+    skeptic_max_data_age_s: float = 60.0          # live: a minute-old price is already old
+    skeptic_line_window_s: float = 120.0
     skeptic_max_line_move_cents: float = 5.0      # Kalshi ask move inside the window
     skeptic_max_fair_move: float = 0.04           # sportsbook fair prob move inside the window
     skeptic_min_sources: int = 2                  # independent books behind fair value
     skeptic_record_lookback: int = 20             # settled trades per market type
     skeptic_record_min_sample: int = 8            # losing record = net P&L < 0 over >= this many
-    skeptic_max_line_age_s: float = 6 * 3600      # book says line unchanged this long = stale
+    skeptic_max_line_age_s: float = 120.0         # live line not updated in 2 min = suspended or stale
 
     # ── Risk Manager ─────────────────────────────────────────────────────────
     risk_stake_pct_of_realized: float = 0.02      # 2% of realized profit
@@ -154,7 +158,7 @@ class Settings:
 
     # ── Execution ────────────────────────────────────────────────────────────
     exec_slippage_cap_cents: int = 1              # limit = observed ask + cap
-    exec_order_timeout_s: float = 45.0            # cancel unfilled remainder after this
+    exec_order_timeout_s: float = 15.0            # cancel unfilled remainder after this (live: don't rest long)
     exec_poll_interval_s: float = 3.0
 
     # ── Monitor ──────────────────────────────────────────────────────────────

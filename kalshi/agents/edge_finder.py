@@ -55,13 +55,22 @@ class EdgeFinder:
         except Exception as e:
             return EdgeResult(None, f"odds fetch failed: {e}")
         start = m.occurrence_time or m.expected_expiration_time
-        tol = self.s.match_max_start_diff_h if m.occurrence_time else self.s.match_max_start_diff_h + 12
-        match = match_market(yes_name, m.title, start, events, tol)
+        match = match_market(yes_name, c.opponent, start, events, self.s.match_max_start_diff_h, m.title)
         if match is None:
-            return EdgeResult(None, "no unambiguous sportsbook match")
+            return EdgeResult(None, f"no unambiguous sportsbook match for {yes_name} vs {c.opponent or '?'}")
         event, team = match
         now = datetime.now(timezone.utc)
-        if self.s.edge_skip_in_play and event.commence_time and event.commence_time <= now:
+        phase = self.s.edge_game_phase
+        if event.commence_time is None:
+            return EdgeResult(None, "sportsbook event has no start time")
+        started = event.commence_time <= now
+        if phase == "live_only":
+            if not started:
+                return EdgeResult(None, f"not live yet (starts {event.commence_time:%m-%d %H:%M} UTC)")
+            age_h = (now - event.commence_time).total_seconds() / 3600
+            if age_h > self.s.edge_max_game_age_h:
+                return EdgeResult(None, f"game started {age_h:.1f}h ago, likely over")
+        elif phase == "pregame_only" and started:
             return EdgeResult(None, "event already started")
 
         sources = event.sources_for(team)

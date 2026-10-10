@@ -156,10 +156,19 @@ def team_match_score(kalshi_name: str, book_team: str) -> float:
     return 1.0
 
 
-def match_market(yes_name: str, title: str, start: datetime | None,
-                 events: list[OddsEvent], max_start_diff_h: float) -> tuple[OddsEvent, str] | None:
+def match_market(yes_name: str, opponent: str, start: datetime | None,
+                 events: list[OddsEvent], max_start_diff_h: float,
+                 title: str = "") -> tuple[OddsEvent, str] | None:
     """Return (event, team that YES pays on), or None when there's no single
-    unambiguous match. Ambiguity means no trade."""
+    unambiguous match. Ambiguity means no trade.
+
+    Kalshi game markets are titled "<Team> wins" with the team in yes_sub_title;
+    the opponent comes from the other market in the same Kalshi event. Both
+    teams must match the sportsbook event. `start` is Kalshi's
+    occurrence_datetime, which sits a few hours after kickoff, so it's compared
+    to the book's commence_time with max_start_diff_h of slack. That window is
+    tight enough to separate back-to-back MLB games between the same teams.
+    """
     hits = []
     title_toks = set(_tokens(title))
     for ev in events:
@@ -169,13 +178,16 @@ def match_market(yes_name: str, title: str, start: datetime | None,
         for team, other in ((ev.home_team, ev.away_team), (ev.away_team, ev.home_team)):
             if team_match_score(yes_name, team) < 1.0:
                 continue
-            # Confirm the opponent shows up in the Kalshi title (any token of its name).
-            if title_toks and not (set(_tokens(other)) & title_toks):
+            if opponent:
+                if team_match_score(opponent, other) < 1.0:
+                    continue
+            elif not (title_toks and set(_tokens(other)) & title_toks):
+                # No sibling market and no opponent in the title: can't confirm the game.
                 continue
             hits.append((ev, team))
     if len(hits) != 1:
         if len(hits) > 1:
-            log.info("ambiguous match for %r: %d events", yes_name, len(hits))
+            log.info("ambiguous match for %r vs %r: %d events", yes_name, opponent, len(hits))
         return None
     return hits[0]
 
