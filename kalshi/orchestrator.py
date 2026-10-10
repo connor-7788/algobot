@@ -20,9 +20,11 @@ agent "working" on the item, and afterward posts what the agent said.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import threading
 import time
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -41,6 +43,31 @@ SKEPTIC = Agent.SKEPTIC.value
 RISK = Agent.RISK.value
 EXEC = Agent.EXECUTION.value
 MONITOR = Agent.MONITOR.value
+LEARNER = "learner"
+
+
+def pass_category(reason: str) -> str:
+    """Bucket an Edge Finder PASS so the dashboard can say why nothing traded."""
+    r = reason.lower()
+    if r.startswith("learner has paused"):
+        return "Learner paused entries (no proven edge)"
+    if r.startswith("edge ") and "confidence" in r.split(". ")[0]:
+        return "edge too small and low confidence"
+    if r.startswith("edge "):
+        return "edge too small after spread + fees"
+    if r.startswith("confidence"):
+        return "confidence below minimum"
+    if "outside" in r and "priced" in r:
+        return "price outside 30-97c band"
+    if "averaging window" in r:
+        return "too close to settlement"
+    if "fetch failed" in r or "no " in r[:12]:
+        return "missing data"
+    if "depth" in r:
+        return "order book too thin"
+    if "books disagree" in r:
+        return "price sources disagree"
+    return "other"
 
 
 class AgentTimeout(Exception):
@@ -62,7 +89,8 @@ class CycleStats:
 
 
 class Orchestrator:
-    def __init__(self, settings, *, scout, edge_finder, skeptic, risk, execution, monitor, journal):
+    def __init__(self, settings, *, scout, edge_finder, skeptic, risk, execution, monitor, journal,
+                 learner=None):
         self.s = settings
         self.scout = scout
         self.edge = edge_finder
@@ -78,6 +106,10 @@ class Orchestrator:
         self.position_lock = threading.Lock()
         self._cycle_no = 0
         self.last_cycle: CycleStats | None = None
+        self.learner = learner
+        self._last_learn = 0.0
+        self._learning = threading.Lock()
+        self._passes: deque = deque()           # (monotonic ts, category) for the last hour
 
     # ── Plumbing ─────────────────────────────────────────────────────────────
 
@@ -135,6 +167,7 @@ class Orchestrator:
             self.board.said(EDGE, "ERROR", f"{ticker}: {e}", ticker=ticker)
             return None
         if res.proposal is None:
+            self._note_pass(res.reason)
             self.board.said(EDGE, "PASS", f"{ticker}: {res.reason}", ticker=ticker)
             if res.diagnostic is not None:
                 self.journal.save(res.diagnostic)
@@ -144,9 +177,8 @@ class Orchestrator:
         p = res.proposal
         stats.proposals += 1
         self.journal.save(p)
-        self.board.said(EDGE, "APPROVE",
-                        f"{ticker}: proposing {p.side.upper()} @ {p.price_cents}c, fair "
-                        f"{p.fair_probability*100:.1f}%, edge {p.edge_cents:.2f}c, confidence {p.confidence_score}",
+        self._note_pass("PROPOSED")
+        self.board.said(EDGE, "APPROVE", f"{ticker}: {p.verdicts[-1].reason}",
                         ticker=ticker, detail=p.verdicts[-1].data_snapshot)
 
         for agent, fn, timeout in (
@@ -234,6 +266,9 @@ class Orchestrator:
             return
         msg = (f"{rep.open_positions} open, {len(rep.settled_now)} settled this pass, "
                f"realized P&L ${rep.realized_total:.2f}")
+        notes = getattr(rep, "settled_notes", [])
+        if notes:
+            msg += ". " + "; ".join(notes)
         if rep.mismatches:
             msg += f", {len(rep.mismatches)} position mismatch(es)"
         self.board.said(MONITOR, "INFO", msg, detail={"settled": rep.settled_now, "mismatches": rep.mismatches,
@@ -248,6 +283,54 @@ class Orchestrator:
                 log.error("reconcile %s failed: %s", p.proposal_id, e)
                 self.board.said(EXEC, "ERROR", f"reconcile {p.market_ticker} failed: {e}", ticker=p.market_ticker)
         self._last_monitor = time.monotonic()
+
+    # ── Why-no-trades tally ──────────────────────────────────────────────────
+
+    def _note_pass(self, reason: str) -> None:
+        now = time.monotonic()
+        self._passes.append((now, "proposed" if reason == "PROPOSED" else pass_category(reason)))
+        while self._passes and now - self._passes[0][0] > 3600:
+            self._passes.popleft()
+
+    def pass_summary(self) -> dict:
+        counts = Counter(c for _, c in self._passes)
+        return {"window_s": 3600, "evaluations": sum(counts.values()), "counts": dict(counts.most_common()),
+                "updated_at": datetime.now(timezone.utc).isoformat()}
+
+    # ── Learner ──────────────────────────────────────────────────────────────
+
+    def _learn_once(self) -> None:
+        if not self._learning.acquire(blocking=False):
+            return
+        try:
+            self.board.working(LEARNER, "labelling settled markets and refitting")
+            labelled = self.learner.label_pending()
+            report = self.learner.refit()
+            try:
+                self.journal.prune_observations(int(time.time() - self.s.learner_window_h * 3600 * 2))
+            except Exception:
+                pass
+            counts = self.journal.observation_counts()
+            p = self.learner.store.get()
+            detail = {"version": p.version, "sigma_scale": p.sigma_scale, "model_weight": p.model_weight,
+                      "edge_min_cents": "PAUSED" if p.paused else p.edge_min_cents,
+                      "observations": counts, "labelled_this_run": labelled, **p.metrics}
+            self.board.said(LEARNER, "PAUSE" if p.paused else "INFO", report, detail=detail,
+                            activity=f"next refit in {self.s.learner_interval_s / 60:.0f} min")
+        except Exception as e:
+            log.exception("learner failed")
+            self.board.said(LEARNER, "ERROR", f"learning pass failed: {e}")
+        finally:
+            self._learning.release()
+
+    def _maybe_learn(self) -> None:
+        if self.learner is None or not self.s.learner_enabled:
+            return
+        if time.monotonic() - self._last_learn < self.s.learner_interval_s:
+            return
+        self._last_learn = time.monotonic()
+        # Own thread: a refit takes seconds and must never hold up a trade cycle.
+        threading.Thread(target=self._learn_once, name="learner", daemon=True).start()
 
     def _post_risk_snapshot(self) -> None:
         try:
@@ -271,6 +354,7 @@ class Orchestrator:
         if time.monotonic() - self._last_monitor >= self.s.monitor_interval_s:
             self.run_monitor()
         self._post_risk_snapshot()
+        self._maybe_learn()
 
         halt = self.risk.halt_reason()
         if halt:
@@ -281,7 +365,8 @@ class Orchestrator:
             self.last_cycle = stats
             return stats
 
-        self.board.working(SCOUT, f"scanning {len(self.s.sport_series)} series")
+        series = self.s.crypto_series if self.s.market_focus == "crypto_15m" else self.s.sport_series
+        self.board.working(SCOUT, f"scanning {', '.join(series)}")
         try:
             candidates = self._call(self.scout.scan, self.s.timeout_scout_s)
         except Exception as e:
@@ -311,6 +396,10 @@ class Orchestrator:
                 stats.errors += 1
         log.info("cycle: %s", stats)
         self.last_cycle = stats
+        try:
+            self.journal.set_flag("pass_summary", json.dumps(self.pass_summary()), by="orchestrator")
+        except Exception as e:
+            log.debug("pass summary write failed: %s", e)
         nxt = datetime.now(timezone.utc) + timedelta(seconds=self.s.scan_interval_s)
         self.board.state(ORCH, "idle", f"sleeping until {nxt:%H:%M:%S} UTC",
                          message=(f"cycle {stats.cycle}: {stats.candidates} candidates, {stats.proposals} proposals, "

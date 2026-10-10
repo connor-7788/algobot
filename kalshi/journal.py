@@ -95,6 +95,24 @@ CREATE TABLE IF NOT EXISTS events (
     kind    TEXT NOT NULL,
     message TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS observations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker      TEXT NOT NULL,
+    series      TEXT,
+    close_ts    INTEGER NOT NULL,
+    secs_left   REAL NOT NULL,
+    spot        REAL NOT NULL,
+    strike      REAL NOT NULL,
+    strike_type TEXT,
+    sigma       REAL NOT NULL,
+    bid         INTEGER,
+    ask         INTEGER,
+    observed_at TEXT NOT NULL,
+    y           INTEGER
+);
+CREATE INDEX IF NOT EXISTS obs_ticker ON observations(ticker);
+CREATE INDEX IF NOT EXISTS obs_close ON observations(close_ts);
 """
 
 
@@ -227,6 +245,32 @@ class Journal:
 
     # ── Dashboard reads ──────────────────────────────────────────────────────
 
+    def win_loss(self) -> tuple[int, int]:
+        """(closed or settled trades, winners) for this mode."""
+        with self._lock:
+            r = self._conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(realized_pnl_usd > 0), 0) FROM proposals WHERE status IN "
+                f"({','.join('?' * len(self._realized))}) AND paper=?",
+                (*self._realized, 1 if self.paper else 0)).fetchone()
+        return int(r[0] or 0), int(r[1] or 0)
+
+    def realized_rows(self, limit: int = 5000) -> list[dict]:
+        """Closed/settled trades only (the P&L history needs nothing else)."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM proposals WHERE status IN ({','.join('?' * len(self._realized))}) AND paper=? "
+                "ORDER BY settled_at DESC LIMIT ?", (*self._realized, 1 if self.paper else 0, int(limit))).fetchall()
+        return [{k: r[k] for k in r.keys() if k != "payload"} for r in rows]
+
+    def recent_results(self, limit: int) -> list[float]:
+        """Realized P&L of the last `limit` closed or settled trades, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT realized_pnl_usd FROM proposals WHERE status IN ({','.join('?' * len(self._realized))}) "
+                "AND realized_pnl_usd IS NOT NULL AND filled_count > 0 AND paper=? ORDER BY settled_at DESC LIMIT ?",
+                (*self._realized, 1 if self.paper else 0, int(limit))).fetchall()
+        return [float(r[0]) for r in rows]
+
     def rows(self, limit: int = 500) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
@@ -329,4 +373,47 @@ class Journal:
         with self._lock:
             self._conn.execute("INSERT INTO events (ts, level, kind, message) VALUES (?, ?, ?, ?)",
                                (_now(), level, kind, message[:2000]))
+            self._conn.commit()
+
+    # ── Learner observations ─────────────────────────────────────────────────
+
+    def add_observation(self, *, ticker, series, close_ts, secs_left, spot, strike, strike_type,
+                        sigma, bid, ask) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO observations (ticker, series, close_ts, secs_left, spot, strike, strike_type,"
+                " sigma, bid, ask, observed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (ticker, series, int(close_ts), float(secs_left), float(spot), float(strike), strike_type,
+                 float(sigma), bid, ask, _now()))
+            self._conn.commit()
+
+    def unlabeled_tickers(self, before_ts: int) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT ticker FROM observations WHERE y IS NULL AND close_ts < ? LIMIT 2000",
+                (int(before_ts),)).fetchall()
+        return [r[0] for r in rows]
+
+    def label_observations(self, ticker: str, y: int) -> int:
+        with self._lock:
+            cur = self._conn.execute("UPDATE observations SET y=? WHERE ticker=? AND y IS NULL", (int(y), ticker))
+            self._conn.commit()
+            return cur.rowcount
+
+    def labeled_observations(self, since_ts: int = 0) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM observations WHERE y IS NOT NULL AND close_ts >= ? ORDER BY close_ts",
+                (int(since_ts),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def observation_counts(self) -> dict:
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT COUNT(*), SUM(y IS NOT NULL), COUNT(DISTINCT ticker) FROM observations").fetchone()
+        return {"total": r[0] or 0, "labelled": r[1] or 0, "markets": r[2] or 0}
+
+    def prune_observations(self, before_ts: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM observations WHERE close_ts < ?", (int(before_ts),))
             self._conn.commit()

@@ -36,6 +36,7 @@ def realized_pnl(p: TradeProposal, result: str) -> float:
 class MonitorReport:
     open_positions: int = 0
     settled_now: list[str] = field(default_factory=list)
+    settled_notes: list[str] = field(default_factory=list)
     needs_reconcile: list[TradeProposal] = field(default_factory=list)
     realized_total: float = 0.0
     mismatches: list[str] = field(default_factory=list)
@@ -77,6 +78,10 @@ class Monitor:
             p.status = Status.SETTLED
             self.journal.save(p)
             rep.settled_now.append(p.proposal_id)
+            won = m.result == p.side
+            rep.settled_notes.append(f"{p.market_ticker} {p.side.upper()} x{p.filled_count} @ "
+                                     f"{p.avg_fill_price_cents:.0f}c {'WON' if won else 'LOST'} "
+                                     f"(${p.realized_pnl_usd:+.2f})")
             log.info("SETTLED %s %s %s x%d -> %s, P&L $%.2f", p.market_ticker, p.side.upper(),
                      p.proposal_id[:8], p.filled_count, m.result, p.realized_pnl_usd)
 

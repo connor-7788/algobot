@@ -20,7 +20,9 @@ from kalshi.client import KalshiDataClient
 from kalshi.history import MarketHistory
 from kalshi.http import KalshiHTTP, KalshiSigner
 from kalshi.journal import Journal
+from kalshi import keepalive
 from kalshi.killswitch import KillSwitch
+from kalshi.learner import Learner, ParamStore
 from kalshi.marks import MarkFeed
 from kalshi.odds_api import OddsAPIClient
 from kalshi.spot import SpotClient
@@ -66,15 +68,22 @@ def build_orchestrator(settings) -> Orchestrator:
 
     journal.log_event("startup", f"paper_mode={settings.paper_mode} env={settings.kalshi_env} "
                                  f"auth={'yes' if signer else 'no'}")
+    params = ParamStore(settings, journal)
+    learner = Learner(settings, journal, data, params)
+    p = params.get()
+    log.info("learned params v%d (%s): sigma x%g, model weight %g, edge min %s", p.version, p.source,
+             p.sigma_scale, p.model_weight, "PAUSED" if p.paused else p.edge_min_cents)
     orch = Orchestrator(
         settings,
         scout=Scout(settings, data, history),
-        edge_finder=EdgeFinder(settings, odds, history, spot),
+        edge_finder=EdgeFinder(settings, odds, history, spot, params=params,
+                               learner=learner if settings.market_focus == "crypto_15m" else None),
         skeptic=Skeptic(settings, history, journal),
         risk=RiskManager(settings, journal, kill),
         execution=Execution(settings, journal, kill, data, http=http),
         monitor=Monitor(settings, journal, data),
         journal=journal,
+        learner=learner if settings.market_focus == "crypto_15m" else None,
     )
     orch.mark_feed = MarkFeed(settings, journal, data, on_tick=orch.run_exits)
     return orch
@@ -88,6 +97,10 @@ def start_engine_thread(settings) -> tuple[threading.Thread, threading.Event]:
             orch = build_orchestrator(settings)
             threading.Thread(target=orch.mark_feed.run_forever, args=(stop,),
                              name="mark-feed", daemon=True).start()
+            if settings.keepalive_url:
+                threading.Thread(target=keepalive.run_forever,
+                                 args=(settings.keepalive_url, settings.keepalive_interval_s, stop),
+                                 name="keepalive", daemon=True).start()
             orch.run_forever(stop)
         except Exception:
             log.exception("engine failed to start")

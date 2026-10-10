@@ -13,7 +13,7 @@ import logging
 
 log = logging.getLogger("status")
 
-AGENT_ORDER = ["orchestrator", "scout", "edge_finder", "skeptic", "risk_manager", "execution", "monitor"]
+AGENT_ORDER = ["orchestrator", "scout", "edge_finder", "skeptic", "risk_manager", "execution", "monitor", "learner"]
 
 
 class StatusBoard:

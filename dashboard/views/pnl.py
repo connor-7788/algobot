@@ -131,6 +131,18 @@ st.caption(f"{'Paper trading' if s.paper_mode else 'LIVE trading'} on Kalshi {s.
            + 
            "Open positions are valued at what you'd get selling right now (your side's bid, minus the exit fee).")
 
+@st.cache_data(ttl=5, show_spinner=False)
+def _win_loss(_j, key: str) -> tuple[int, int]:
+    return _j.win_loss()
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _realized(_j, key: str) -> list[dict]:
+    return _j.realized_rows(limit=5000)
+
+
+CACHE_KEY = f"{s.journal_db_path}:{s.paper_mode}"
+
 if "live_hist" not in st.session_state:
     st.session_state.live_hist = deque(maxlen=600)       # ~10 minutes at 1/s
 
@@ -153,9 +165,7 @@ def live():
     tz = ZoneInfo(s.timezone)
     midnight = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     today = j.realized_pnl_since(midnight)
-    settled = [r for r in j.rows(limit=5000)
-               if r["status"] in REALIZED and r["paper"] == (1 if s.paper_mode else 0)]
-    wins = sum(1 for r in settled if (r["realized_pnl_usd"] or 0) > 0)
+    n_settled, wins = _win_loss(j, CACHE_KEY)
 
     ages = [r.mark_age_s for r in rows if r.mark_age_s is not None]
     freshest = min(ages) if ages else None
@@ -172,10 +182,10 @@ def live():
     c[0].markdown(tile("Total P&L", realized + unreal, "realized + open", hero=True), unsafe_allow_html=True)
     c[1].markdown(tile("Open P&L (live)", unreal if held else 0.0,
                        f"{len(held)} position{'s' if len(held) != 1 else ''}"), unsafe_allow_html=True)
-    c[2].markdown(tile("Realized", realized, f"{len(settled)} settled"), unsafe_allow_html=True)
+    c[2].markdown(tile("Realized", realized, f"{n_settled} settled"), unsafe_allow_html=True)
     c[3].markdown(tile("Today", today, f"limit -${s.risk_daily_loss_limit_usd:,.0f}"), unsafe_allow_html=True)
-    rate = f"{wins / len(settled) * 100:.0f}%" if settled else "n/a"
-    c[4].markdown(tile("Win rate", None, f"{wins}W / {len(settled) - wins}L", text=rate), unsafe_allow_html=True)
+    rate = f"{wins / n_settled * 100:.0f}%" if n_settled else "n/a"
+    c[4].markdown(tile("Win rate", None, f"{wins}W / {n_settled - wins}L", text=rate), unsafe_allow_html=True)
 
     hist = st.session_state.live_hist
     if held:
@@ -188,7 +198,7 @@ def live():
             st.altair_chart(signed_area(df, "ts", "open_pnl", "Open P&L ($)", 230,
                                         [alt.Tooltip("ts:T", title="Time", format="%H:%M:%S"),
                                          alt.Tooltip("open_pnl:Q", title="Open P&L", format="+$,.2f")]),
-                            use_container_width=True)
+                            use_container_width=True, key="live_open_chart")
         else:
             st.caption("The line starts drawing once there's an open position and this page has been open a few seconds.")
     with right:
@@ -202,7 +212,7 @@ def live():
                                             alt.Tooltip("pnl:Q", title="P&L", format="+$,.2f"),
                                             alt.Tooltip("pct:N", title="Return")],
                                            max(120, 34 * len(bdf))),
-                            use_container_width=True)
+                            use_container_width=True, key="live_pos_chart")
         else:
             st.caption("No priced positions.")
 
@@ -235,8 +245,7 @@ st.divider()
 
 @st.fragment(run_every=15)
 def history():
-    settled = [r for r in j.rows(limit=5000)
-               if r["status"] in REALIZED and r["paper"] == (1 if s.paper_mode else 0)]
+    settled = _realized(j, CACHE_KEY)
     if not settled:
         st.markdown("##### Equity curve")
         st.info("No closed trades yet. Positions count here once they settle or hit take-profit / stop-loss.")
@@ -254,7 +263,7 @@ def history():
                                  alt.Tooltip("trade:N", title="Trade"),
                                  alt.Tooltip("pnl:Q", title="Trade P&L", format="+$,.2f"),
                                  alt.Tooltip("cum:Q", title="Running total", format="+$,.2f")]),
-                    use_container_width=True)
+                    use_container_width=True, key="equity_chart")
 
     left, right = st.columns(2)
     with left:
@@ -268,7 +277,7 @@ def history():
                                         alt.Tooltip("pnl:Q", title="P&L", format="+$,.2f"),
                                         alt.Tooltip("record:N", title="Record")],
                                        max(120, 34 * len(g))),
-                        use_container_width=True)
+                        use_container_width=True, key="series_chart")
     with right:
         st.markdown("##### Recent results")
         recent = df.sort_values("settled_at", ascending=False).head(15)

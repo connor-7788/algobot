@@ -213,6 +213,9 @@ class Settings:
     # the spread and another fee. Set True to re-enable.
     risk_exits_enabled: bool = False
     risk_one_entry_per_market: bool = True        # no re-entry after an exit in the same market
+    # Losing-run cool-down: if the last N settled trades net negative, stake x factor.
+    risk_cooldown_lookback: int = 10
+    risk_cooldown_factor: float = 0.5
 
     # ── Execution ────────────────────────────────────────────────────────────
     exec_slippage_cap_cents: int = 1              # limit = observed ask + cap
@@ -222,6 +225,23 @@ class Settings:
     # ── Monitor ──────────────────────────────────────────────────────────────
     monitor_interval_s: float = 60.0
     marks_interval_s: float = 1.0                 # live prices for open positions (one request per tick)
+
+    # ── Learner (self-improvement from settled markets) ─────────────────────
+    learner_enabled: bool = True
+    learner_interval_s: float = 1800.0            # refit every 30 min
+    learner_window_h: float = 72.0                # learn from the last 3 days
+    learner_min_observations: int = 1500          # ~100 settled markets before any change
+    learner_min_improvement: float = 0.002        # held-out log loss must drop by this to switch
+    learner_min_trades: int = 30                  # simulated trades needed on the older 70%
+    learner_min_t: float = 1.0                    # newer 30% must be positive with t >= this
+    timeout_learner_s: float = 120.0
+
+    # ── Keep-alive ───────────────────────────────────────────────────────────
+    # Render's free plan stops a service after 15 minutes without inbound
+    # traffic, and the engine stops with it. Pinging our own public URL keeps
+    # it awake (Render sets RENDER_EXTERNAL_URL). Empty disables it.
+    keepalive_url: str = ""
+    keepalive_interval_s: float = 600.0
 
     # ── Storage / dashboard ──────────────────────────────────────────────────
     journal_db_path: str = "data/journal.db"
@@ -257,5 +277,6 @@ def load_settings(dotenv_path: str = ".env") -> Settings:
         journal_db_path=os.getenv("JOURNAL_DB_PATH", "data/journal.db"),
         dashboard_password=os.getenv("DASHBOARD_PASSWORD", ""),
         port=int(os.getenv("PORT", "10000")),
+        keepalive_url=os.getenv("KEEPALIVE_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip(),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )

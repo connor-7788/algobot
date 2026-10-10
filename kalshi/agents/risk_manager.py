@@ -88,7 +88,24 @@ class RiskManager:
     def stake_usd(self) -> float:
         realized = self.journal.realized_pnl_total()
         raw = self.s.risk_stake_pct_of_realized * max(realized, 0.0)
-        return min(self.s.risk_stake_ceiling_usd, max(self.s.risk_stake_floor_usd, raw))
+        stake = min(self.s.risk_stake_ceiling_usd, max(self.s.risk_stake_floor_usd, raw))
+        return stake * self.cooldown_factor()[0]
+
+    def cooldown_factor(self) -> tuple[float, str]:
+        """Learns from recent results: after a losing run, bet smaller until it recovers.
+        Can only shrink the stake, never grow it."""
+        n = self.s.risk_cooldown_lookback
+        if n <= 0:
+            return 1.0, ""
+        recent = self.journal.recent_results(n)
+        if len(recent) < n:
+            return 1.0, ""
+        net = sum(recent)
+        if net < 0:
+            wins = sum(1 for r in recent if r > 0)
+            return self.s.risk_cooldown_factor, (f"last {n} trades went {wins}-{n - wins} (${net:+.2f}), "
+                                                 f"stake cut to {self.s.risk_cooldown_factor:.0%}")
+        return 1.0, ""
 
     @staticmethod
     def _position_cost(p: TradeProposal) -> float:
@@ -133,12 +150,27 @@ class RiskManager:
                 "per_contract_usd": round(per_contract, 4), "event_cost_usd": round(event_cost, 2),
                 "open_positions": len(open_pos), "limits": limits, "binding": binding}
 
+        _, cool = self.cooldown_factor()
+        snap["cooldown"] = cool
+        today = self.pnl_today()
+        snap["pnl_today"] = round(today, 2)
+        why_binding = {
+            "proposed": "Edge Finder's depth cap",
+            "stake": (f"stake ${stake:.2f} / ${per_contract:.2f} per contract worst case"
+                      + (f"; {cool}" if cool else "")),
+            "event_exposure": f"${room:.2f} room left of ${s.risk_max_event_exposure_usd:.0f} in this event",
+        }[binding]
+        context = (f"{len(open_pos)}/{s.risk_max_open_positions} positions open, today ${today:+.2f} "
+                   f"(stop at -${s.risk_daily_loss_limit_usd:.0f}), realized ${realized:+.2f}")
         if new_count < 1:
-            return AgentDecision.reject(f"size rounds to 0 (binding: {binding})", **snap)
+            return AgentDecision.reject(f"size rounds to 0: {why_binding}. {context}", **snap)
+        cost = new_count * per_contract
         if new_count >= p.contract_count:
-            return AgentDecision(Decision.APPROVE, f"{p.contract_count} contracts within limits", snap)
+            return AgentDecision(Decision.APPROVE,
+                                 f"{p.contract_count} contracts (${cost:.2f} max) fit every limit. {context}", snap)
         return AgentDecision(Decision.MODIFY,
-                             f"sized {p.contract_count} -> {new_count} (binding: {binding})",
+                             f"sized {p.contract_count} -> {new_count} contracts (${cost:.2f} max), limited by "
+                             f"{why_binding}. {context}",
                              snap, {"contract_count": new_count})
 
     # ── Exits ────────────────────────────────────────────────────────────────

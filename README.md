@@ -79,6 +79,23 @@ Set `MARKET_FOCUS=sports_live` to go back to live sports (that mode needs `ODDS_
 
 So the bot now scales model volatility by 0.8, blends its probability with the market's (model weight 0.25), never buys below 30c, holds to settlement, and enters each market at most once. Expect it to trade rarely. That's the point: most of what it used to trade had negative expected value.
 
+## Learner: the agents improve from results
+
+`kalshi/learner.py`. Every minute Edge Finder looks at a market, it records spot, strike, time left, volatility and Kalshi's bid/ask. After the market settles, Learner attaches the outcome. That's ~13 labelled examples per market whether or not the bot traded, so it learns from every market, not only from its own handful of trades.
+
+Every 30 minutes, once there are 1,500+ labelled examples (about 10 hours of markets), it refits on the last 72 hours:
+
+* Calibration: it searches volatility scale 0.5-1.3 and model weight 0-0.75 on the older 70% of markets and only switches if the new values beat the current ones on the newer 30% (held-out log loss, by at least 0.002).
+* Entry threshold: it tries 3, 5, 8 and 12c minimum edge. A threshold is used only if it made money on the older 70% (30+ simulated trades) and also on the newer 30% (t >= 1). If none does, Edge Finder is paused until the evidence changes.
+
+Every change is versioned, logged to the journal and announced on the Agents Live page. Learner never touches Risk Manager's limits. Risk Manager learns one thing on its own: if the last 10 settled trades lost money in total, it halves the stake until the record recovers. Skeptic already refuses a series whose recent record is negative.
+
+## Why it doesn't bet often
+
+The Agents Live page shows a tally of Edge Finder's reasons for the last hour. In practice almost all of it is "edge too small after spread + fees": fair value leans 75% on Kalshi's own price (because the backtest showed Kalshi's price was the better forecast), so to find 3c of edge the model has to disagree with the market by roughly 20+ points after paying the half-spread, a 1c slippage cap and a ~1.7c fee. That rarely happens. Only three markets (BTC, ETH, SOL) are open at a time and each is traded at most once, so even with edge everywhere the ceiling is ~12 trades an hour.
+
+The free Render plan was the other cause: it stops the service after 15 minutes without a visitor, and the engine stops with it. The engine now pings its own public URL (`RENDER_EXTERNAL_URL`, set by Render) every 10 minutes so it stays awake. That uses ~744 of the 750 free instance hours per month, so it only works for one always-on free service per account.
+
 ## Take-profit and stop-loss (off by default)
 
 Every second, the mark feed reprices open positions and Risk Manager checks two limits on net P&L (selling at the bid, minus the exit fee, minus what you paid): `risk_take_profit_pct` (default +25%) and `risk_stop_loss_pct` (default 20% loss). When one hits, Execution sells the whole position. Live, that's an immediate-or-cancel, reduce-only limit order at the bid; in paper mode it simulates the sale at the bid. Exits count as realized P&L and show as CLOSED in the journal. Positions that hit neither limit are held to settlement. Turn exits off with `risk_exits_enabled = False`.

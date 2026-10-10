@@ -53,11 +53,31 @@ def blend_with_market(p_model: float, p_market: float, model_weight: float) -> f
 class EdgeFinder:
     name = Agent.EDGE_FINDER.value
 
-    def __init__(self, settings, odds: OddsAPIClient, history: MarketHistory, spot=None):
+    def __init__(self, settings, odds: OddsAPIClient, history: MarketHistory, spot=None,
+                 params=None, learner=None):
         self.s = settings
         self.odds = odds
         self.history = history
         self.spot = spot            # SpotClient for crypto 15m markets
+        self.params = params        # learner.ParamStore: calibration + entry threshold learned from results
+        self.learner = learner      # learner.Learner: records what we saw so outcomes can teach us
+
+    def _learned(self):
+        if self.params is not None:
+            return self.params.get()
+        return None
+
+    def _sigma_scale(self) -> float:
+        p = self._learned()
+        return p.sigma_scale if p else self.s.crypto_sigma_scale
+
+    def _model_weight(self) -> float:
+        p = self._learned()
+        return p.model_weight if p else self.s.crypto_model_weight
+
+    def _edge_min(self, crypto: bool) -> float:
+        p = self._learned()
+        return p.edge_min_cents if (p and crypto) else self.s.edge_min_cents
 
     # ── Fair value: sports (devigged sportsbook consensus) ───────────────────
 
@@ -116,22 +136,57 @@ class EdgeFinder:
         if bid is None or ask is None:
             return "no two-sided market to anchor fair value"
         market_mid = (bid + ask) / 200.0
-        sources = []
+        scale, weight = self._sigma_scale(), self._model_weight()
+        sources, models = [], []
         for q in quotes:
-            p_above = prob_avg_at_or_above(q.price, m.floor_strike, secs, sigma * self.s.crypto_sigma_scale)
+            p_above = prob_avg_at_or_above(q.price, m.floor_strike, secs, sigma * scale)
             if p_above is None:
-                return f"{secs:.0f}s left: inside the averaging window"
+                return f"{secs:.0f}s left: inside the averaging window, the result is mostly locked in"
             p_model = p_above if m.strike_type in ("greater", "greater_or_equal") else 1.0 - p_above
-            p_yes = blend_with_market(p_model, market_mid, self.s.crypto_model_weight)
+            models.append(p_model)
+            p_yes = blend_with_market(p_model, market_mid, weight)
             sources.append(Source(name=q.source, probability=p_yes, fetched_at=q.fetched_at,
                                   observed_at=q.observed_at, detail={"spot": q.price, "model": round(p_model, 5)}))
         fair_yes, dispersion = consensus(sources)
         spot_mid = statistics.median(q.price for q in quotes)
+        if self.learner is not None and m.close_time and m.floor_strike:
+            try:
+                self.learner.observe(ticker=m.ticker, series=m.series_ticker, close_ts=int(m.close_time.timestamp()),
+                                     secs_left=secs, spot=spot_mid, strike=m.floor_strike,
+                                     strike_type=m.strike_type, sigma=sigma, bid=bid, ask=ask)
+            except Exception as e:          # learning must never block trading decisions
+                log.warning("observation not recorded: %s", e)
         ctx = {"crypto": {"asset": c.asset, "spot": spot_mid, "strike": m.floor_strike,
                           "strike_type": m.strike_type, "seconds_left": round(secs, 1),
                           "sigma_per_min": round(sigma * 60 ** 0.5, 6),
-                          "move_needed_pct": round((m.floor_strike / spot_mid - 1) * 100, 4)}}
+                          "move_needed_pct": round((m.floor_strike / spot_mid - 1) * 100, 4),
+                          "p_model": round(statistics.median(models), 5), "market_mid": round(market_mid, 4),
+                          "sigma_scale": scale, "model_weight": weight}}
         return sources, fair_yes, dispersion, ctx
+
+    # ── Reasoning text ───────────────────────────────────────────────────────
+
+    def _explain(self, c: Candidate, ctx: dict, fair_yes: float, best: dict, thr: float, score: int,
+                 n_sources: int, dispersion: float) -> str:
+        """One readable paragraph with the numbers that drove the call."""
+        side = best["side"].upper()
+        cost = best["limit"] + best["fee"]
+        trade = (f"Buy {side} at {best['ask']}c (+{self.s.exec_slippage_cap_cents}c slippage, "
+                 f"+{best['fee']:.1f}c fee = {cost:.1f}c) vs fair {100 * best['fair']:.1f}c: "
+                 f"edge {best['edge']:+.1f}c, need {thr:+.0f}c.")
+        if "crypto" in ctx:
+            k = ctx["crypto"]
+            dist = -k["move_needed_pct"]
+            where = "above" if dist >= 0 else "below"
+            return (f"{k['asset']} {k['spot']:,.2f} is {abs(dist):.3f}% {where} the {k['strike']:,.2f} strike "
+                    f"with {k['seconds_left'] / 60:.1f} min left (vol {100 * k['sigma_per_min']:.3f}%/min). "
+                    f"Model says YES {100 * k['p_model']:.0f}%, Kalshi mid {100 * k['market_mid']:.0f}%, "
+                    f"blended fair {100 * fair_yes:.1f}% (model weight {k['model_weight']:g}). {trade} "
+                    f"Confidence {score}.")
+        ev = ctx.get("matched_event", {})
+        return (f"{ev.get('yes_team', c.market.yes_sub_title)}: {n_sources} books average "
+                f"{100 * fair_yes:.1f}% (spread between books {100 * dispersion:.1f} pts). {trade} "
+                f"Confidence {score}.")
 
     def evaluate(self, c: Candidate) -> EdgeResult:
         m, book = c.market, c.book
@@ -155,7 +210,10 @@ class EdgeFinder:
                 best = {"side": side, "ask": ask, "limit": limit, "fee": fee_c,
                         "edge": edge_c, "fair": fair_side}
         if best is None:
-            return EdgeResult(None, "no ask on either side")
+            lo, hi = self.s.edge_min_price_cents, self.s.edge_max_price_cents
+            asks = [book.best_ask_cents(sd) for sd in ("yes", "no")]
+            return EdgeResult(None, f"both sides priced outside {lo}-{hi}c (YES ask {asks[0]}, NO ask {asks[1]}); "
+                                    f"cheap long shots lost money in the backtest")
 
         side = best["side"]
         confirmations = self.history.edge_confirmations(m.ticker, side, self.s.edge_confirm_window_s,
@@ -177,9 +235,13 @@ class EdgeFinder:
             **ctx,
         }
 
+        thr = self._edge_min(bool(c.asset))
+        snapshot["edge_min_cents"] = thr
         problems = []
-        if best["edge"] < self.s.edge_min_cents:
-            problems.append(f"edge {best['edge']:.2f}c < {self.s.edge_min_cents}c")
+        if thr >= 999:
+            problems.append("Learner has paused entries: no edge threshold made money on recent settled markets")
+        elif best["edge"] < thr:
+            problems.append(f"edge {best['edge']:.2f}c < {thr:g}c")
         if score < self.s.edge_min_confidence:
             problems.append(f"confidence {score} < {self.s.edge_min_confidence}")
         if dispersion > self.s.edge_max_book_dispersion:
@@ -197,14 +259,17 @@ class EdgeFinder:
                 confidence_score=score, book_fetched_at=book.fetched_at, close_time=m.close_time,
             )
 
+        story = self._explain(c, ctx, fair_yes, best, min(thr, 99), score, len(sources), dispersion)
         if problems:
             diag = None
+            why = "; ".join(problems) + ". " + story
             if self.s.journal_edge_rejects:
                 diag = build()
-                diag.add_verdict(self.name, Decision.REJECT, "; ".join(problems), snapshot)
-            return EdgeResult(None, "; ".join(problems), diag)
+                diag.add_verdict(self.name, Decision.REJECT, why, snapshot)
+            return EdgeResult(None, why, diag)
 
         p = build()
         p.add_verdict(self.name, Decision.APPROVE,
-                      f"edge {best['edge']:.2f}c after fees, confidence {score}", snapshot)
+                      f"edge {best['edge']:.2f}c after fees, confidence {score}. {story} "
+                      f"Upper bound {upper} contracts ({depth:g} resting at the ask).", snapshot)
         return EdgeResult(p, "proposed")

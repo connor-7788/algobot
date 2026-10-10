@@ -24,6 +24,7 @@ AGENT_LABELS = {
     "risk_manager": "Risk Manager",
     "execution": "Execution",
     "monitor": "Monitor",
+    "learner": "Learner",
 }
 PIPELINE = list(AGENT_LABELS)
 

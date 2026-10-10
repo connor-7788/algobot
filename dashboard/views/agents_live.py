@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import streamlit as st
 
@@ -15,14 +17,20 @@ refresh = st.select_slider("Refresh every", options=[2, 5, 10, 30], value=5, for
 
 STATE_COLOR = {"working": "green", "idle": "gray", "halted": "orange", "error": "red"}
 DECISION_COLOR = {"APPROVE": "green", "MODIFY": "orange", "REJECT": "red", "PASS": "gray",
-                  "ERROR": "red", "INFO": "blue"}
+                  "ERROR": "red", "INFO": "blue", "PAUSE": "orange"}
+QUIET_NOTE = {
+    "skeptic": "Quiet until Edge Finder proposes a trade.",
+    "risk_manager": "Quiet until Skeptic approves a trade.",
+    "execution": "Quiet until Risk Manager approves a trade.",
+    "learner": "Runs on the first engine cycle, then every 30 minutes.",
+}
 
 
 def card(agent: str, r: dict | None) -> None:
     with st.container(border=True):
         st.markdown(f"### {AGENT_LABELS[agent]}")
         if not r:
-            st.caption("No report yet. The engine may still be starting.")
+            st.caption(QUIET_NOTE.get(agent, "No report yet. The engine may still be starting."))
             return
         # Only the agents that report every cycle can go stale; Skeptic etc. are
         # legitimately quiet until there's a proposal to look at.
@@ -42,13 +50,36 @@ def card(agent: str, r: dict | None) -> None:
                 st.json(r["detail"], expanded=False)
 
 
+def why_no_bets() -> None:
+    raw = j.get_flag("pass_summary", "")
+    try:
+        summ = json.loads(raw) if raw else {}
+    except ValueError:
+        summ = {}
+    counts = summ.get("counts") or {}
+    total = summ.get("evaluations") or 0
+    with st.container(border=True):
+        st.markdown("#### Why it is or isn't betting (last hour)")
+        if not total:
+            st.caption("No evaluations yet this hour. The tally resets when the engine restarts.")
+            return
+        proposed = counts.get("proposed", 0)
+        st.markdown(f"Edge Finder priced **{total:,}** market snapshots and proposed **{proposed}** trades "
+                    f"({proposed / total * 100:.1f}%). Everything else was passed for these reasons:")
+        df = pd.DataFrame([{"Reason": k, "Count": v, "Share": v / total}
+                           for k, v in counts.items() if k != "proposed"])
+        if not df.empty:
+            st.dataframe(df.style.format({"Share": "{:.0%}"}), hide_index=True, use_container_width=True)
+
+
 @st.fragment(run_every=refresh)
 def board():
     rows = {r["agent"]: r for r in j.agent_statuses()}
-    top = st.columns(3)
-    for col, agent in zip(top, ["orchestrator", "scout", "monitor"]):
+    top = st.columns(4)
+    for col, agent in zip(top, ["orchestrator", "scout", "monitor", "learner"]):
         with col:
             card(agent, rows.get(agent))
+    why_no_bets()
     st.markdown("#### Trade pipeline")
     mid = st.columns(4)
     for col, agent in zip(mid, ["edge_finder", "skeptic", "risk_manager", "execution"]):

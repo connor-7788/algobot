@@ -143,8 +143,12 @@ class Execution:
             p.entry_bid_cents = 100.0 - float(book["yes_ask"])
         p.fees_paid_usd = taker_fee_usd(p.price_cents, p.contract_count, self.s)
         p.order_id = f"paper-{p.proposal_id[:8]}"
+        cost = p.filled_count * p.price_cents / 100.0
+        win = p.filled_count * 1.0 - cost - p.fees_paid_usd
         p.add_verdict(self.name, Decision.APPROVE,
-                      f"paper fill {p.filled_count} @ {p.price_cents}c", {"order": order, "paper": True})
+                      f"paper fill {p.filled_count} {p.side.upper()} @ {p.price_cents}c: cost ${cost:.2f} + "
+                      f"fee ${p.fees_paid_usd:.2f}. Pays ${win:+.2f} if {p.side.upper()} wins, "
+                      f"${-cost - p.fees_paid_usd:+.2f} if not", {"order": order, "paper": True})
         p.status = Status.PAPER_FILLED
         self.journal.save(p)
         return p
