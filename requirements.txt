@@ -1,6 +1,5 @@
-alpaca-trade-api
-kalshi-python
-pandas
-rich
-python-dotenv
-requests
+requests>=2.31,<3
+cryptography>=42
+streamlit>=1.37,<2
+pandas>=2.0
+tzdata>=2024.1

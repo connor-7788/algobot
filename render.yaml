@@ -1,23 +1,37 @@
+# Render Blueprint. One web service: Streamlit binds $PORT, the engine runs in a
+# background thread of the same process (see launch.py).
+#
+# plan + disk: the free plan spins services down when idle (the engine thread
+# would stop) and has no persistent disk (the journal, and with it realized P&L
+# for sizing and today's loss total, would reset on every deploy). Starter is
+# the cheapest plan that avoids both.
 services:
   - type: web
     name: algotrader
-    env: python
+    runtime: python
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python launch.py
+    disk:
+      name: journal
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
-      - key: ALPACA_API_KEY
-        sync: false
-      - key: ALPACA_SECRET_KEY
-        sync: false
-      - key: ALPACA_PAPER
-        value: true
-      - key: KALSHI_API_KEY
-        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: PAPER_MODE
+        value: "true"
+      - key: KILL_SWITCH
+        value: "false"
       - key: KALSHI_ENV
         value: demo
+      - key: JOURNAL_DB_PATH
+        value: /var/data/journal.db
+      - key: KALSHI_API_KEY
+        sync: false
       - key: KALSHI_PRIVATE_KEY_CONTENT
         sync: false
       - key: ODDS_API_KEY
         sync: false
-      - key: PORT
-        value: 10000
+      - key: DASHBOARD_PASSWORD
+        sync: false

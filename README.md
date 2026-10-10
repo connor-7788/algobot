@@ -1,139 +1,96 @@
-# 📈 AlgoTrader v2.2 — Setup & Launch Guide
+# AlgoTrader: Kalshi agent pipeline
 
-## What This Bot Does
-- **Equity Engine** — EMA 8/21 crossover + RSI + volume confirmation strategy on US stocks via Alpaca
-- **Sports Arbitrage Engine** — Kalshi prediction market arb against sportsbook odds
-- **Watchdog** — monitors both engines 24/7 and auto-restarts either if they crash
-- **Live Dashboards** — Streamlit dashboards on ports 8500 and 8502
+Every Kalshi trade passes through a chain of agents. Each one approves, kills, or (Risk only) shrinks it before anything reaches the exchange.
 
----
-
-## Step 1 — Get Python 3
-
-If you don't have Python 3 installed:
-1. Go to https://www.python.org/downloads/
-2. Download the latest Python 3.x installer
-3. Run it, follow the steps
-4. Open Terminal and verify: `python3 --version`
-
----
-
-## Step 2 — Get Your Alpaca API Keys (Required)
-
-1. Go to https://alpaca.markets and sign up (free)
-2. From your dashboard → **Paper Trading** (left sidebar)
-3. Click **API Keys** → **Generate New Key**
-4. Copy your **API Key ID** and **Secret Key** (you only see the secret once!)
-5. For real money later: repeat in the **Live Trading** section
-
----
-
-## Step 3 — Run the Bot
-
-### macOS — easiest way
-1. Right-click `AlgoTrader.command` → **Open**
-2. macOS will ask permission — click **Open**
-3. It installs everything automatically, then asks for your API keys
-
-### Terminal (Mac/Linux)
-```bash
-cd /path/to/algotrader
-chmod +x run_algotrader.sh
-./run_algotrader.sh
+```
+Scout -> Edge Finder -> Skeptic -> Risk Manager -> Execution
+                                                      |
+Monitor (settlement, realized P&L) <------------------+
 ```
 
-### Direct Python
+Only `kalshi/agents/execution.py` imports the order client (`kalshi/orders.py`). A unit test parses every file and fails if anything else does. Execution re-verifies the whole verdict chain before sending and refuses anything missing an approval.
+
+PAPER_MODE defaults to true. In paper mode Execution logs the exact order it would have sent and simulates a fill at the ask. Nothing touches your Kalshi balance until you set `PAPER_MODE=false`.
+
+## Layout
+
+| Path | What it does |
+|---|---|
+| `launch.py` | Binds `$PORT` with Streamlit first, then starts the engine in a background thread |
+| `config.py` | Every threshold, plus env-var loading |
+| `kalshi/proposal.py` | `TradeProposal`, verdicts, MODIFY scope rules |
+| `kalshi/agents/scout.py` | Filters open markets by volume, spread, depth, time to close |
+| `kalshi/agents/edge_finder.py` | Fair value from devigged sportsbook lines, edge after fees, confidence score |
+| `kalshi/agents/skeptic.py` | Kills on stale data, line moves, single source, losing record |
+| `kalshi/agents/risk_manager.py` | Sizing, 10-position cap, per-event cap, daily loss limit, kill switch |
+| `kalshi/agents/execution.py` | Limit orders only, slippage cap, partial fills, cancel after timeout |
+| `kalshi/agents/monitor.py` | Settles positions and books realized P&L |
+| `kalshi/orchestrator.py` | Runs the loop, enforces per-agent timeouts, writes the journal |
+| `kalshi/journal.py` | SQLite: proposals, verdicts, live agent status, kill switch flag |
+| `kalshi/fees.py` | Kalshi fee formula and 2026 rounding rules |
+| `dashboard/` | Overview, Agents Live, Journal pages |
+| `tests/` | stdlib `unittest`, no network |
+
+## Environment variables
+
+Same names your old Render service used, plus a few new ones.
+
+| Var | Default | Notes |
+|---|---|---|
+| `PAPER_MODE` | `true` | `false` sends real orders |
+| `KILL_SWITCH` | `false` | `true` stops all new trading; the dashboard toggle can't override it |
+| `KALSHI_ENV` | `demo` | `demo` or `prod` |
+| `KALSHI_API_KEY` | | API key ID |
+| `KALSHI_PRIVATE_KEY_CONTENT` | | PEM text; literal `\n` is fine |
+| `KALSHI_PRIVATE_KEY_PATH` | | Alternative to the above (Render secret file) |
+| `ODDS_API_KEY` | | the-odds-api.com; without it Edge Finder finds nothing |
+| `JOURNAL_DB_PATH` | `data/journal.db` | Put it on a persistent disk in production |
+| `DASHBOARD_PASSWORD` | | If set, required to flip the kill switch |
+
+A local `.env` file is read automatically and is git-ignored.
+
+## Run locally
+
 ```bash
-cd /path/to/algotrader
-pip install alpaca-trade-api pandas numpy requests cryptography rich streamlit plotly questionary
-python3 launch.py
+pip install -r requirements.txt
+python launch.py                 # dashboard on http://localhost:10000
+python -m unittest discover -s tests -t .
 ```
 
----
+## How each rule works
 
-## Step 4 — Enter Your Credentials
+Sizing is 2% of realized profit, clamped between `risk_stake_floor_usd` and `risk_stake_ceiling_usd`. With no realized profit yet, you trade the floor. Contracts are `floor(stake / (ask + slippage cap + fee))`.
 
-When prompted:
-- **Alpaca API Key** + **Secret Key** → from Step 2
-- **Trading mode** → start with Paper Trading (safe, no real money)
-- **Sports engine** → enter Kalshi + theOddsAPI keys, or skip with Enter
+Edge Finder doesn't size. It sets an upper bound on contracts (the lesser of `edge_max_contracts` and half the depth at the ask), and Risk sizes down from there. Risk can never raise the count or touch side or price; `TradeProposal.add_verdict` raises `ScopeViolation` if any agent tries, and the orchestrator records that as a REJECT.
 
-Your keys save to `~/.algotrader_config.json` — you only enter them once.
+Edge is `100 * fair - (ask + slippage cap) - fee per contract`, in cents. The slippage cap is in there because Execution's limit price is ask + cap, so the edge has to survive paying it. The fee is the worse of taker and maker for a 1-contract fill, which bounds the per-contract fee from above.
 
----
+The fee formula was checked against Kalshi's schedule effective July 7, 2026: taker `0.07 * C * P * (1-P)`, maker `0.0175 * C * P * (1-P)` on series with maker fees, rounded up to your account's precision. `fee_balance_precision` defaults to $0.01, which overstates fees slightly if you're a direct member. That's the safe direction.
 
-## Optional Data Sources
+Daily loss limit counts realized P&L since midnight New York time. When it's hit, Risk rejects everything and the orchestrator stops scanning until the next day.
 
-When prompted, you can paste API keys for extra live data:
+The 10-position cap counts approved, filled, and uncertain proposals. An UNCERTAIN proposal is one where Execution couldn't confirm the order state (a timeout mid-send, say). It keeps its slot until Execution reconciles it by `client_order_id`, which is the proposal ID, so a retry can never place a second order.
 
-| Source | What it adds | Get key at |
-|--------|-------------|------------|
-| **Polygon.io** | Real-time US equities, options chain | https://polygon.io |
-| **Finnhub** | Global stocks, forex, crypto, news sentiment | https://finnhub.io |
-| **CoinGecko** | Crypto prices (FREE — no key needed) | automatic |
-| **ActionNetwork** | Sharp money %, line movement | https://actionnetwork.com (public, no key needed) |
-| **Sportradar** | Pro sports: lineups, injuries, live scores | https://developer.sportradar.com |
+Per-agent timeouts count as REJECT. The exception is Execution: if it times out, an order might be live, so the proposal goes to UNCERTAIN instead.
 
-All optional — skip any you don't need.
+## Dashboard
 
----
+Overview shows open positions, realized P&L, today's P&L against the limit, the next stake size, and a one-line status per agent.
 
-## Dashboards
+Agents Live shows a card per agent with what it's doing right now, the last thing it said (APPROVE, REJECT, MODIFY, PASS), and the data behind that, plus a live feed you can filter by agent. It refreshes on its own every 2 to 30 seconds.
 
-After launch, open these in your browser:
-- **http://localhost:8500** — Combined command center (equity + sports)
-- **http://localhost:8502** — Kalshi high-confidence bets
+Journal lists every proposal with each agent's verdict and reason. The "Rejected by" filter and the bar chart show which agent kills the most trades. Pick a proposal to see its full verdict trail and data snapshots.
 
----
+The kill switch toggle is in the sidebar on every page.
 
-## Strategy Details
+## Before you set PAPER_MODE=false
 
-**Entry:**
-- EMA 8 crosses above EMA 21
-- RSI between 38–58
-- Volume 1.2× the 20-bar average
-- 5-min higher-timeframe trend aligned
+1. Let paper mode run long enough to see settled results in the journal. Paper fills at the ask are optimistic: real limit orders don't always fill.
+2. Check `KALSHI_ENV`. Demo keys only work on demo, prod keys only on prod.
+3. Verify the NO-side mapping with one contract in demo. Kalshi's V2 order API uses a single YES book, so buying NO at 40c is sent as selling YES at 60c. The docs support this, but confirm the resulting position shows as NO before trusting it with size.
+4. Check the Scout log at startup for "returned 0 open markets". That means a series ticker in `config.sport_series` is wrong.
+5. Watch Odds API credits. Each `/odds` call costs credits; `odds_cache_s` controls how often each sport is refreshed.
 
-**Exits:**
-- Take profit: +2.5%
-- Stop loss: −1.3% (ATR-based)
-- Trailing stop: activates after +0.8% gain
-- Max hold: 90 minutes
-- Force-exit: 15 minutes before market close
+## Render notes
 
-**Risk Controls:**
-- Max 3 concurrent positions
-- 2% daily loss circuit breaker (halts all trading)
-- VIX > 30 reduces position size by 50%
-- Sentiment halt on FOMC / news keywords
-
----
-
-## Stopping the Bot
-
-Press `Ctrl + C` in the Terminal window. Both engines and dashboards shut down cleanly.
-
----
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `launch.py` | Main launcher — starts engines + dashboards |
-| `cross_asset_trader.py` | Core engine runner + watchdog + data hub |
-| `equity_engine.py` | Wall Street leg (Alpaca stocks) |
-| `kalshi_engine.py` | Sports arb leg (Kalshi + OddsAPI) |
-| `risk_gatekeeper.py` | Daily loss limits, position caps, VIX filter |
-| `sentiment_filter.py` | News/FOMC halt logic |
-| `config.py` | All tunable parameters in one place |
-| `dashboard_combined.py` | Streamlit dashboard port 8500 |
-| `dashboard_kalshi_bets.py` | Streamlit dashboard port 8502 |
-
----
-
-## ⚠️ Disclaimer
-
-This is an algorithmic trading tool for educational purposes.
-Past performance does not guarantee future results.
-Only risk money you can afford to lose.
-You are solely responsible for any trades placed.
+`render.yaml` sets the Starter plan with a 1 GB disk. The free plan spins idle services down (the engine thread stops with it) and has no disk, so the journal would reset on every deploy. That reset would wipe realized P&L (sizing drops back to the floor) and today's loss total (the daily limit forgets losses). Don't run it live on the free plan.

@@ -1,118 +1,194 @@
 """
-config.py — Central configuration for the Cross-Asset Trading Engine.
-All tunable parameters live here. Never hard-code values in logic files.
+config.py: every threshold for the Kalshi agent pipeline lives here.
+
+Secrets and deploy switches come from environment variables (Render dashboard
+or a local .env). Everything else is a plain default in the Settings dataclass.
+Agents receive a Settings instance; none of them define their own constants.
+
+Env vars read:
+    PAPER_MODE                  "true" (default) | "false"
+    KILL_SWITCH                 "false" (default) | "true"
+    KALSHI_ENV                  "demo" (default) | "prod"
+    KALSHI_API_KEY              Kalshi API key ID
+    KALSHI_PRIVATE_KEY_CONTENT  PEM text (literal "\\n" sequences are accepted)
+    KALSHI_PRIVATE_KEY_PATH     alternative: path to a PEM file (Render secret file)
+    ODDS_API_KEY                the-odds-api.com key
+    JOURNAL_DB_PATH             SQLite path (default data/journal.db)
+    DASHBOARD_PASSWORD          optional; gates the kill switch toggle
+    PORT                        port Streamlit binds (Render sets this)
 """
 
+from __future__ import annotations
+
 import os
-from dataclasses import dataclass, field
-from typing import List
-
-# ── API Credentials (load from environment — never commit keys) ──────────────
-ALPACA_API_KEY    = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ALPACA_PAPER      = os.getenv("ALPACA_PAPER", "true").lower() == "true"
-
-KALSHI_API_KEY    = os.getenv("KALSHI_API_KEY", "")
-KALSHI_EMAIL      = os.getenv("KALSHI_EMAIL", "")
-KALSHI_PASSWORD   = os.getenv("KALSHI_PASSWORD", "")
-KALSHI_ENV        = os.getenv("KALSHI_ENV", "demo")   # "demo" | "prod"
-
-ODDS_API_KEY      = os.getenv("ODDS_API_KEY", "")    # theOddsAPI.com
-BENZINGA_API_KEY  = os.getenv("BENZINGA_API_KEY", "")
-# ── New Live Data Sources ─────────────────────────────────────────────────────
-# Polygon.io — real-time US equities, options, forex, crypto
-# Sign up: https://polygon.io/  (free tier: delayed | paid: real-time)
-POLYGON_API_KEY   = os.getenv("POLYGON_API_KEY", "")
-
-# Finnhub — global stocks, forex, crypto, earnings, news sentiment
-# Sign up: https://finnhub.io/  (free tier: 60 req/min)
-FINNHUB_API_KEY   = os.getenv("FINNHUB_API_KEY", "")
-
-# Sportradar — professional sports data: lineups, injuries, live scores
-# Sign up: https://developer.sportradar.com/  (trials available)
-SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY", "")
-
-# ActionNetwork — sharp money tracking, line movement, consensus picks
-# Premium key optional — public endpoints work without a key
-ACTION_NETWORK_KEY = os.getenv("ACTION_NETWORK_KEY", "")
-# CoinGecko — crypto prices (FREE, no key needed — accessed directly)
-
-# ── Database ──────────────────────────────────────────────────────────────────
-POSTGRES_DSN   = os.getenv("POSTGRES_DSN", "postgresql://trader:trader@localhost:5432/tradedb")
-INFLUX_URL     = os.getenv("INFLUX_URL",   "http://localhost:8086")
-INFLUX_TOKEN   = os.getenv("INFLUX_TOKEN", "")
-INFLUX_ORG     = os.getenv("INFLUX_ORG",  "trading")
-INFLUX_BUCKET  = os.getenv("INFLUX_BUCKET","tickdata")
-
-# ── Risk / Firewall ───────────────────────────────────────────────────────────
-MAX_DAILY_LOSS_PCT      = 0.02    # 2%  — hard kill-switch across entire account
-MAX_STOCK_POSITION_PCT  = 0.15    # 15% of equity per stock position
-MAX_KALSHI_POSITION_USD = 0       # 0 = no fixed cap; high-confidence bets use KALSHI_BET_FRACTION
-MAX_CONCURRENT_STOCKS   = 4
-MAX_CONCURRENT_KALSHI   = 3
-DATA_LATENCY_LIMIT_MS   = 500     # halt orders if feed age > 500ms
-CAPITAL_SPLIT_STOCK_PCT = 0.60    # 60% capital reserved for equities
-CAPITAL_SPLIT_KALSHI_PCT= 0.40    # 40% capital reserved for Kalshi
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 
-# ── Dump Protection ───────────────────────────────────────────────────────────
-DUMP_THRESHOLD_PCT  = 0.015   # 1.5% drop triggers emergency sell
-DUMP_LOOKBACK_BARS  = 2       # number of 1-min bars to look back for the drop
+def _load_dotenv(path: str = ".env") -> None:
+    """Minimal .env loader so local runs work without python-dotenv.
+    Never overrides a variable that is already set in the environment."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for raw in p.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
 
-# ── Equity Strategy ───────────────────────────────────────────────────────────
-STOCK_SYMBOLS      = ["AAPL", "TSLA", "NVDA", "AMZN", "MSFT", "AMD", "META", "GOOGL", "SPY", "QQQ"]
-EMA_FAST           = 8
-EMA_SLOW           = 21
-RSI_PERIOD         = 14
-RSI_LONG_MIN       = 38
-RSI_LONG_MAX       = 58
-RSI_SHORT_MIN      = 42
-RSI_SHORT_MAX      = 65
-ATR_PERIOD         = 14
-ATR_MULTIPLIER     = 1.5          # stop = entry ± (ATR × multiplier)
-TAKE_PROFIT_PCT    = 0.025
-TRAILING_TRIGGER   = 0.008        # activate trail after +0.8% in favour
-TRAILING_STOP_PCT  = 0.010
-EARLY_STOP_PCT     = 0.007
-EARLY_STOP_MINS    = 5
-MAX_HOLD_MINS      = 90
-CLOSE_EARLY_MINS   = 15           # force-exit N min before market close
-EMA_SEP_MIN_PCT    = 0.001
-VOLUME_MULT_MIN    = 1.2
-ADX_TREND_MIN      = 25           # ADX > 25 = trending market, prefer directional
-VIX_HIGH_THRESHOLD = 30           # VIX > 30 = reduce position size by 50%
-POLL_SECONDS       = 30
 
-# ── Kalshi / Arbitrage ────────────────────────────────────────────────────────
-KALSHI_SPORTS      = ["NFL", "NBA", "MLB", "EPL", "NHL", "MMA", "NCAAF", "NCAAB"]
-MIN_EDGE_PCT       = 0.03         # only trade arb if edge > 3% (was 5%)
-MAX_SPREAD_PCT     = 0.12         # skip market if bid/ask spread > 12% (was 8%)
-KALSHI_BET_FRACTION = 0.05        # stake 5% of Kalshi bankroll per high-confidence bet
-HIGH_CONF_MIN_EDGE_PCT = 0.04     # require stronger edge than basic arb (was 0.08)
-HIGH_CONF_MAX_SPREAD_PCT = 0.10   # spread allowed for executable confidence (was 0.04)
-HIGH_CONF_MIN_BOOKS = 1           # only 1 book required — OddsAPI sometimes only returns 1 (was 2)
-HIGH_CONF_CONFIRMATIONS = 1       # confirmations before placing (was 3 — caused 15s delay)
-HIGH_CONF_LOOKBACK_SEC = 90       # confirmation window
-HIGH_CONF_EDGE_DECAY_PCT = 0.02   # reject if edge fades too much while confirming
-HIGH_CONF_MIN_SCORE = 50          # confidence score required to place order (was 80)
-VELOCITY_WINDOW_S  = 60           # "in-play velocity" window in seconds
-VELOCITY_THRESHOLD = 0.03         # 3% price move in window = major event
-KALSHI_POLL_SEC    = 5            # poll Kalshi every 5s (faster than stocks)
-EARLY_EXIT_THRESH  = 0.85         # take Kalshi profit if prob hits 85% (was 50%)
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
-# ── Sentiment / News ─────────────────────────────────────────────────────────
-SENTIMENT_HALT_KEYWORDS = [
-    "FOMC", "Fed decision", "rate hike", "emergency", "circuit breaker",
-    "trading halt", "injury report", "ejected", "suspended"
-]
-NEWS_LOOKBACK_MINS = 10           # check news published in last N minutes
 
-# ── Dashboard ─────────────────────────────────────────────────────────────────
-DASH_HOST          = "0.0.0.0"
-DASH_PORT_A        = 8501         # Wall Street Engine dashboard
-DASH_PORT_B        = 8502         # Sharp Sports Command dashboard
-DASH_REFRESH_MS    = 1000         # 1 second refresh on dashboard        # in-app dashboard update interval
+# Kalshi series ticker -> the-odds-api sport key.
+# VERIFY: these series tickers are my best knowledge of Kalshi's single-game
+# winner series as of Oct 2026. Scout logs any series that returns zero open
+# markets at startup, which is the signal that a ticker here is wrong.
+DEFAULT_SPORT_SERIES = {
+    "KXNFLGAME": "americanfootball_nfl",
+    "KXNCAAFGAME": "americanfootball_ncaaf",
+    "KXNBAGAME": "basketball_nba",
+    "KXMLBGAME": "baseball_mlb",
+    "KXNHLGAME": "icehockey_nhl",
+}
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-LOG_LEVEL          = os.getenv("LOG_LEVEL", "INFO")
-LOG_FILE           = "logs/engine.log"
+
+@dataclass(frozen=True)
+class Settings:
+    # ── Deploy switches ──────────────────────────────────────────────────────
+    paper_mode: bool = True
+    kill_switch_env: bool = False
+    kalshi_env: str = "demo"                      # "demo" | "prod"
+    timezone: str = "America/New_York"            # defines "today" for the daily loss limit
+
+    # ── Kalshi API ───────────────────────────────────────────────────────────
+    # Base URLs from docs.kalshi.com (read Oct 10, 2026). Both are config so a
+    # change on Kalshi's side is a config edit, not a code edit.
+    kalshi_base_urls: dict = field(default_factory=lambda: {
+        "demo": "https://external-api.demo.kalshi.co/trade-api/v2",
+        "prod": "https://external-api.kalshi.com/trade-api/v2",
+    })
+    kalshi_api_key_id: str = ""
+    kalshi_private_key_pem: str = ""
+    kalshi_private_key_path: str = ""
+    http_timeout_s: float = 10.0
+    http_max_retries: int = 4
+    http_backoff_base_s: float = 0.5
+    http_backoff_max_s: float = 8.0
+    # Basic tier budgets (tokens/sec). Most requests cost 10 tokens, cancels 2.
+    rate_read_tokens_per_s: float = 200.0
+    rate_write_tokens_per_s: float = 100.0
+    rate_default_cost: int = 10
+    rate_cancel_cost: int = 2
+    self_trade_prevention_type: str = "taker_at_cross"
+
+    # ── Fees (Kalshi fee schedule effective Jul 7, 2026) ─────────────────────
+    # taker = ceil(M * 0.07 * C * P * (1-P)); maker = ceil(M_maker * 0.0175 * C * P * (1-P))
+    # Rounding is to your account's balance precision: $0.01 for FCM-cleared
+    # members, $0.0001 for direct members. $0.01 is the conservative choice
+    # (it can only overstate fees). Change once you know your member type.
+    fee_taker_coefficient: float = 0.07
+    fee_maker_coefficient: float = 0.0175
+    fee_taker_multiplier: float = 1.0
+    fee_maker_multiplier: float = 1.0             # assume maker fees apply (safe side)
+    fee_balance_precision: float = 0.01
+
+    # ── Orchestrator ─────────────────────────────────────────────────────────
+    scan_interval_s: float = 60.0
+    timeout_scout_s: float = 45.0
+    timeout_edge_s: float = 20.0
+    timeout_skeptic_s: float = 5.0
+    timeout_risk_s: float = 5.0
+    timeout_execution_s: float = 90.0
+    timeout_monitor_s: float = 45.0
+    journal_edge_rejects: bool = False            # also journal candidates Edge Finder passed on
+
+    # ── Scout ────────────────────────────────────────────────────────────────
+    sport_series: dict = field(default_factory=lambda: dict(DEFAULT_SPORT_SERIES))
+    scout_min_volume_24h: float = 500.0           # contracts
+    scout_min_ask_depth: float = 25.0             # contracts resting at the best ask
+    scout_max_spread_cents: int = 6               # X
+    scout_min_minutes_to_close: int = 30          # N
+    scout_max_candidates_per_series: int = 40
+    scout_orderbook_depth: int = 10
+
+    # ── Edge Finder ──────────────────────────────────────────────────────────
+    odds_api_base: str = "https://api.the-odds-api.com/v4"
+    odds_api_key: str = ""
+    odds_bookmakers: str = "pinnacle,fanduel,draftkings,betmgm,williamhill_us"
+    odds_cache_s: float = 120.0                   # each call spends Odds API credits
+    edge_min_cents: float = 3.0                   # after fees and slippage cap
+    edge_min_confidence: int = 60                 # confidence model score, 0-100
+    edge_max_book_dispersion: float = 0.04        # max stdev of devigged probs across books
+    edge_confirm_window_s: float = 300.0
+    edge_max_contracts: int = 500                 # hard ceiling on the proposal's upper bound
+    edge_max_depth_take: float = 0.5              # never propose more than this share of ask depth
+    match_max_start_diff_h: float = 36.0          # Kalshi vs sportsbook start time tolerance
+    edge_skip_in_play: bool = True                # pregame only; in-play lines move too fast
+
+    # ── Skeptic ──────────────────────────────────────────────────────────────
+    skeptic_max_data_age_s: float = 180.0
+    skeptic_line_window_s: float = 300.0
+    skeptic_max_line_move_cents: float = 5.0      # Kalshi ask move inside the window
+    skeptic_max_fair_move: float = 0.04           # sportsbook fair prob move inside the window
+    skeptic_min_sources: int = 2                  # independent books behind fair value
+    skeptic_record_lookback: int = 20             # settled trades per market type
+    skeptic_record_min_sample: int = 8            # losing record = net P&L < 0 over >= this many
+    skeptic_max_line_age_s: float = 6 * 3600      # book says line unchanged this long = stale
+
+    # ── Risk Manager ─────────────────────────────────────────────────────────
+    risk_stake_pct_of_realized: float = 0.02      # 2% of realized profit
+    risk_stake_floor_usd: float = 1.00
+    risk_stake_ceiling_usd: float = 25.00
+    risk_max_open_positions: int = 10
+    risk_max_event_exposure_usd: float = 40.00
+    risk_daily_loss_limit_usd: float = 30.00
+
+    # ── Execution ────────────────────────────────────────────────────────────
+    exec_slippage_cap_cents: int = 1              # limit = observed ask + cap
+    exec_order_timeout_s: float = 45.0            # cancel unfilled remainder after this
+    exec_poll_interval_s: float = 3.0
+
+    # ── Monitor ──────────────────────────────────────────────────────────────
+    monitor_interval_s: float = 60.0
+
+    # ── Storage / dashboard ──────────────────────────────────────────────────
+    journal_db_path: str = "data/journal.db"
+    dashboard_password: str = ""
+    port: int = 10000
+    log_level: str = "INFO"
+
+    @property
+    def kalshi_base_url(self) -> str:
+        if self.kalshi_env not in self.kalshi_base_urls:
+            raise ValueError(f"KALSHI_ENV must be one of {list(self.kalshi_base_urls)}")
+        return self.kalshi_base_urls[self.kalshi_env]
+
+    def with_overrides(self, **kwargs) -> "Settings":
+        return replace(self, **kwargs)
+
+
+def load_settings(dotenv_path: str = ".env") -> Settings:
+    _load_dotenv(dotenv_path)
+    pem = os.getenv("KALSHI_PRIVATE_KEY_CONTENT", "").replace("\\n", "\n").strip()
+    return Settings(
+        paper_mode=_env_bool("PAPER_MODE", True),
+        kill_switch_env=_env_bool("KILL_SWITCH", False),
+        kalshi_env=os.getenv("KALSHI_ENV", "demo").strip().lower(),
+        kalshi_api_key_id=os.getenv("KALSHI_API_KEY", "").strip(),
+        kalshi_private_key_pem=pem,
+        kalshi_private_key_path=os.getenv("KALSHI_PRIVATE_KEY_PATH", "").strip(),
+        odds_api_key=os.getenv("ODDS_API_KEY", "").strip(),
+        journal_db_path=os.getenv("JOURNAL_DB_PATH", "data/journal.db"),
+        dashboard_password=os.getenv("DASHBOARD_PASSWORD", ""),
+        port=int(os.getenv("PORT", "10000")),
+        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    )
