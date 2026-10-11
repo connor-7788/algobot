@@ -363,9 +363,7 @@ class Orchestrator:
                 trade_lessons = lessons(self.journal.shadow_rows(limit=5000))
             except Exception as e:
                 log.debug("lessons failed: %s", e)
-            explore = (" Paper exploration is ON: the bot keeps taking small paper trades on the chart model "
-                       "so it learns from its own results." if (p.paused and self.s.paper_mode and
-                                                                  self.s.paper_explore and p.chart) else "")
+            explore = self._trading_mode_note(p)
             if trade_lessons:
                 report += " From settled trades: " + "; ".join(trade_lessons[:3]) + "."
             detail = {"version": p.version, "mode": p.mode, "sigma_scale": p.sigma_scale,
@@ -379,6 +377,20 @@ class Orchestrator:
             self.board.said(LEARNER, "ERROR", f"learning pass failed: {e}")
         finally:
             self._learning.release()
+
+    def _trading_mode_note(self, p) -> str:
+        """One sentence on how Edge Finder is trading right now (mirrors EdgeFinder's own precedence)."""
+        if not p.paused:
+            return f" Trading: edge threshold {p.edge_min_cents:g}c, proven on newer markets."
+        strat = p.strategy or {}
+        if strat and self.s.follow_best_strategy and (self.s.paper_mode or strat.get("validated")):
+            name = strat["strategy"] + (f" when {strat['setup']}" if strat.get("setup") else " on every market")
+            return (f" Trading: following the best tested strategy ({name})"
+                    + ("." if strat.get("validated") else ", paper only until it proves itself on newer markets."))
+        if self.s.paper_mode and self.s.paper_explore and p.chart:
+            return (" Trading: paper exploration, small paper trades on the chart model so it learns from "
+                    "its own results.")
+        return " Trading: paused until a strategy proves itself."
 
     def _maybe_learn(self) -> None:
         if self.learner is None or not self.s.learner_enabled:

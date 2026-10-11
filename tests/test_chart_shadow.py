@@ -296,3 +296,21 @@ class TestFollowStrategy(unittest.TestCase):
         res = ef.evaluate(Candidate(btc_market(seconds_left=420), book(51, 52), "", asset="BTC"))
         self.assertIsNotNone(res.proposal, res.reason)
         self.assertIn("FOLLOWING BEST STRATEGY:", res.proposal.verdicts[0].reason)
+
+
+class TestTradingModeNote(unittest.TestCase):
+    def test_note_matches_what_edge_finder_does(self):
+        from kalshi.orchestrator import Orchestrator
+        rec = {"n": 100, "roi": 0.01, "cents": 1.0, "win_rate": 0.9, "t": 0.2, "se": 0.02}
+        strat = {"strategy": "favorite", "setup": "ahead of strike / momentum with / 80c+", "validated": False,
+                 "train": rec, "valid": rec}
+        o = Orchestrator.__new__(Orchestrator)
+        o.s = h.settings(market_focus="crypto_15m", paper_mode=True)
+        note = o._trading_mode_note(LearnedParams(0.8, 0, PAUSED, strategy=strat, chart={"coef": [0]}))
+        self.assertIn("following the best tested strategy (favorite when ahead", note)
+        self.assertNotIn("exploration", note)
+        note = o._trading_mode_note(LearnedParams(0.8, 0, PAUSED, chart={"coef": [0]}))
+        self.assertIn("paper exploration", note)
+        o.s = h.settings(market_focus="crypto_15m", paper_mode=False)
+        self.assertIn("paused", o._trading_mode_note(LearnedParams(0.8, 0, PAUSED, strategy=strat)))
+        self.assertIn("edge threshold 5c", o._trading_mode_note(LearnedParams(0.8, 0, 5.0)))
