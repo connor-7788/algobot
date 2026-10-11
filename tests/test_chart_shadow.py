@@ -229,3 +229,70 @@ class TestShadow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSelector(unittest.TestCase):
+    def _rows(self, strategy, n, win_p, entry, seed, setup_feats=None, t0=T0):
+        rng = random.Random(seed)
+        f = setup_feats or {k: 0.0 for k in FEATURES}
+        out = []
+        for i in range(n):
+            won = rng.random() < win_p
+            out.append({"strategy": strategy, "side": "yes", "entry_cents": entry, "fee_cents": 1.5,
+                        "pnl_cents": (100 - entry - 1.5) if won else (-entry - 1.5), "won": int(won),
+                        "close_ts": t0 + 900 * i, "feats": f})
+        return out
+
+    def test_picks_best_return_per_dollar_and_validates(self):
+        from kalshi import selector
+        rows = (self._rows("underdog", 300, 0.40, 25, 1)        # +55% per $ expected
+                + self._rows("favorite", 300, 0.90, 88, 2)      # wins more often, ~+0.6% per $
+                + self._rows("momentum", 300, 0.50, 55, 3))     # loses
+        best = selector.select(rows)
+        self.assertEqual(best["strategy"], "underdog")
+        self.assertTrue(best["validated"])
+        self.assertIn("underdog", selector.describe(best))
+        self.assertGreater(best["train"]["roi"], 0.2)
+
+    def test_not_validated_when_newer_trades_lose(self):
+        from kalshi import selector
+        rows = self._rows("fade", 210, 0.62, 50, 4) + self._rows("fade", 90, 0.30, 50, 5, t0=T0 + 900 * 210)
+        best = selector.select(rows)
+        self.assertEqual(best["strategy"], "fade")
+        self.assertFalse(best["validated"])
+        self.assertIn("NOT validated", selector.describe(best))
+
+
+class TestFollowStrategy(unittest.TestCase):
+    def _store(self, s, validated):
+        store = ParamStore(s)
+        rec = {"n": 100, "roi": 0.05, "cents": 2.0, "win_rate": 0.6, "t": 1.5, "se": 0.02}
+        store.set(LearnedParams(0.8, 0.0, PAUSED, version=3, strategy={
+            "strategy": "momentum", "setup": None, "validated": validated, "train": rec, "valid": rec}))
+        return store
+
+    def test_paper_follows_momentum_inside_entry_window(self):
+        s = h.settings(market_focus="crypto_15m", paper_mode=True)
+        ef = EdgeFinder(s, None, MarketHistory(), ChartSpot(82990.0), params=self._store(s, False))
+        res = ef.evaluate(Candidate(btc_market(seconds_left=420), book(51, 52), "", asset="BTC"))
+        self.assertIsNotNone(res.proposal, res.reason)
+        p = res.proposal
+        self.assertEqual(p.side, "yes")                      # ChartSpot climbs into now: momentum toward YES
+        self.assertIn("FOLLOWING BEST STRATEGY (paper only", p.verdicts[0].reason)
+        self.assertEqual(p.verdicts[0].data_snapshot["crypto"]["strategy"], "momentum")
+
+    def test_waits_outside_window_and_live_needs_validation(self):
+        s = h.settings(market_focus="crypto_15m", paper_mode=True)
+        ef = EdgeFinder(s, None, MarketHistory(), ChartSpot(82990.0), params=self._store(s, False))
+        res = ef.evaluate(Candidate(btc_market(seconds_left=800), book(51, 52), "", asset="BTC"))
+        self.assertIsNone(res.proposal)
+        self.assertIn("following momentum", res.reason)
+        live = h.settings(market_focus="crypto_15m", paper_mode=False)
+        ef = EdgeFinder(live, None, MarketHistory(), ChartSpot(82990.0), params=self._store(live, False))
+        res = ef.evaluate(Candidate(btc_market(seconds_left=420), book(51, 52), "", asset="BTC"))
+        self.assertIsNone(res.proposal)
+        self.assertNotIn("FOLLOWING", res.reason)
+        ef = EdgeFinder(live, None, MarketHistory(), ChartSpot(82990.0), params=self._store(live, True))
+        res = ef.evaluate(Candidate(btc_market(seconds_left=420), book(51, 52), "", asset="BTC"))
+        self.assertIsNotNone(res.proposal, res.reason)
+        self.assertIn("FOLLOWING BEST STRATEGY:", res.proposal.verdicts[0].reason)

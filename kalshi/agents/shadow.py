@@ -84,6 +84,30 @@ def group(rows: list[dict], key) -> dict[str, dict]:
     return {k: stats(v) for k, v in buckets.items()}
 
 
+def pick_side(strategy: str, feats: dict, p_chart: float | None, bid: int, ask: int, settings):
+    """(side, reason) for a strategy on one snapshot, or None if it has no opinion here."""
+    no_ask = 100 - bid
+    m5 = feats.get("mom5", 0.0)                     # + = toward YES
+    if strategy == "chart":
+        if p_chart is None:
+            return None
+        e_yes = 100 * p_chart - ask - worst_case_fee_per_contract_cents(ask, settings)
+        e_no = 100 * (1 - p_chart) - no_ask - worst_case_fee_per_contract_cents(no_ask, settings)
+        side = "yes" if e_yes >= e_no else "no"
+        return side, f"chart model says YES {p_chart * 100:.0f}%, best value on {side.upper()} ({max(e_yes, e_no):+.1f}c)"
+    if strategy in ("momentum", "fade"):
+        if abs(m5) < 0.3:
+            return None
+        with_side = "yes" if m5 > 0 else "no"
+        side = with_side if strategy == "momentum" else ("no" if with_side == "yes" else "yes")
+        return side, f"5-min momentum {m5:+.1f}σ toward YES; {strategy} takes {side.upper()}"
+    if strategy in ("favorite", "underdog"):
+        fav = "yes" if (bid + ask) >= 100 else "no"
+        side = fav if strategy == "favorite" else ("no" if fav == "yes" else "yes")
+        return side, f"{strategy}: {side.upper()} at {ask if side == 'yes' else no_ask}c"
+    return None
+
+
 def postmortem(t: dict, result: str, settle_value: float | None, last_obs: dict | None) -> tuple[int, float, str]:
     """(won, pnl cents, explanation) for one settled shadow trade."""
     side, entry, fee = t["side"], float(t["entry_cents"]), float(t["fee_cents"])
@@ -154,28 +178,8 @@ class Shadow:
 
     # ── Open ─────────────────────────────────────────────────────────────────
 
-    def _pick(self, strategy: str, feats: dict, p_chart: float | None, bid: int, ask: int):
-        """(side, reason) for a strategy, or None if it has no opinion here."""
-        no_ask = 100 - bid
-        m5 = feats.get("mom5", 0.0)                     # + = toward YES
-        if strategy == "chart":
-            if p_chart is None:
-                return None
-            e_yes = 100 * p_chart - ask - worst_case_fee_per_contract_cents(ask, self.s)
-            e_no = 100 * (1 - p_chart) - no_ask - worst_case_fee_per_contract_cents(no_ask, self.s)
-            side = "yes" if e_yes >= e_no else "no"
-            return side, f"chart model says YES {p_chart * 100:.0f}%, best value on {side.upper()} ({max(e_yes, e_no):+.1f}c)"
-        if strategy in ("momentum", "fade"):
-            if abs(m5) < 0.3:
-                return None
-            with_side = "yes" if m5 > 0 else "no"
-            side = with_side if strategy == "momentum" else ("no" if with_side == "yes" else "yes")
-            return side, f"5-min momentum {m5:+.1f}σ toward YES; {strategy} takes {side.upper()}"
-        if strategy in ("favorite", "underdog"):
-            fav = "yes" if (bid + ask) >= 100 else "no"
-            side = fav if strategy == "favorite" else ("no" if fav == "yes" else "yes")
-            return side, f"{strategy}: {side.upper()} ({'YES' if side == 'yes' else 'NO'} ask {ask if side == 'yes' else no_ask}c)"
-        return None
+    def _pick(self, strategy, feats, p_chart, bid, ask):
+        return pick_side(strategy, feats, p_chart, bid, ask, self.s)
 
     def consider(self, *, ticker: str, series: str, close_ts: int, secs_left: float, spot: float, strike: float,
                  strike_type: str, bid: int, ask: int, feats: dict | None, p_chart: float | None,

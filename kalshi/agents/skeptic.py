@@ -88,7 +88,9 @@ class Skeptic:
 
         edge_snap = next((v.data_snapshot for v in p.verdicts if v.agent == Agent.EDGE_FINDER.value), {}) or {}
         crypto = edge_snap.get("crypto") or {}
-        exploring = bool(crypto.get("exploring"))
+        # Paper exploration and paper strategy-following exist to gather results; don't let
+        # the record checks that results feed shut them off.
+        exploring = bool(crypto.get("exploring")) or (bool(crypto.get("strategy")) and self.s.paper_mode)
 
         # 4. Losing record on this market type
         results = self.journal.market_type_results(p.series_ticker, s.skeptic_record_lookback)
@@ -114,7 +116,8 @@ class Skeptic:
             if st["n"]:
                 setup_txt = (f", setup '{key}' {st['win_rate'] * 100:.0f}% wins over {st['n']} past trades "
                              f"({st['avg_cents']:+.1f}c)")
-            if st["n"] >= s.skeptic_setup_min_n and st["avg_cents"] < 0 and st["t"] <= s.skeptic_setup_max_t:
+            if (st["n"] >= s.skeptic_setup_min_n and st["avg_cents"] < 0 and st["t"] <= s.skeptic_setup_max_t
+                    and not (crypto.get("strategy") and exploring)):
                 return AgentDecision.reject(
                     f"this setup keeps losing: '{key}' won {st['win_rate'] * 100:.0f}% of {st['n']} shadow and "
                     f"bot trades, {st['avg_cents']:+.1f}c per contract (t {st['t']:.1f})",

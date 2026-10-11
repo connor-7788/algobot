@@ -57,13 +57,15 @@ def page():
 
     paused = (p.get("edge_min_cents") or 0) >= 999
     mode = p.get("mode", "blend")
-    exploring = paused and s.paper_mode and s.paper_explore and bool(p.get("chart"))
+    strat = p.get("strategy") or {}
+    following = bool(paused and strat and s.follow_best_strategy and (s.paper_mode or strat.get("validated")))
+    exploring = paused and not following and s.paper_mode and s.paper_explore and bool(p.get("chart"))
     m = p.get("metrics") or {}
     c = st.columns(4)
     c[0].metric("Pricing with", {"chart": "Chart", "blend": "Kalshi"}.get(mode, mode),
                 help="The chart model is used for real decisions only after it beats Kalshi's own price on "
                      "markets it didn't train on.")
-    c[1].metric("Trading", "Explore" if exploring else "Paused" if paused else
+    c[1].metric("Trading", "Strategy" if following else "Explore" if exploring else "Paused" if paused else
                 f"≥{p.get('edge_min_cents', s.edge_min_cents):g}c",
                 help="Explore = paper only: Learner found no proven edge, so the bot keeps taking small paper "
                      "trades on the chart model to learn from its own results.")
@@ -79,6 +81,33 @@ def page():
     if p.get("fitted_at"):
         st.caption(f"Model v{p.get('version', 0)}, refit {ago(p['fitted_at'])}. Refits every "
                    f"{s.learner_interval_s / 60:.0f} min on the last {s.learner_window_h:.0f}h.")
+
+    st.markdown("#### Strategy it's following")
+    if strat:
+        tr, va = strat["train"], strat["valid"]
+        name = strat["strategy"] + (f" when {strat['setup']}" if strat.get("setup") else " on every market")
+        st.markdown(f"**{name}** "
+                    + ("(validated on newer markets)" if strat.get("validated") else
+                       "(paper only: not yet profitable on newer markets, so live mode would not follow it)"))
+        k = st.columns(3)
+        k[0].metric("Older trades", f"{tr['roi'] * 100:+.1f}% per $", f"{tr['win_rate'] * 100:.0f}% wins, n={tr['n']}",
+                    delta_color="off")
+        k[1].metric("Newer trades", f"{va['roi'] * 100:+.1f}% per $", f"{va['win_rate'] * 100:.0f}% wins, n={va['n']}",
+                    delta_color="off")
+        k[2].metric("Newer t-stat", f"{va['t']:+.1f}", "≥ +1 to validate", delta_color="off")
+        rk = pd.DataFrame([{"Strategy": r["strategy"], "Setup": r["setup"] or "all markets",
+                            "Older % per $": r["train"]["roi"], "Newer % per $": r["valid"]["roi"],
+                            "Win rate": r["all"]["win_rate"], "Trades": r["all"]["n"]}
+                           for r in strat.get("ranking", [])])
+        if not rk.empty:
+            st.dataframe(rk.style.format({"Older % per $": "{:+.1%}", "Newer % per $": "{:+.1%}",
+                                          "Win rate": "{:.0%}"})
+                         .map(lambda v: color(v * 100), subset=["Older % per $", "Newer % per $"]),
+                         hide_index=True, use_container_width=True)
+            st.caption("Ranked on older trades by return per dollar minus one standard error, so a lucky "
+                       "small sample can't win. Newer trades are the honest check.")
+    else:
+        st.caption("Not enough settled shadow trades to rank strategies yet.")
 
     st.markdown("#### What the chart has taught it")
     if p.get("lessons"):

@@ -253,6 +253,11 @@ class Settings:
     shadow_entry_min_secs: float = 150.0
     # Skeptic refuses setups (side of strike x momentum x price band) whose
     # shadow + real record over >= N trades loses money with t <= -1.
+    # Follow the best tested strategy (kalshi/selector.py). Paper mode follows
+    # the winner even if it hasn't proven itself on newer markets (so you can
+    # watch it); live mode only follows a validated winner.
+    follow_best_strategy: bool = True
+    selector_min_t: float = 1.0
     skeptic_setup_min_n: int = 40
     skeptic_setup_max_t: float = -1.0
     # On startup, rebuild learning data from the last N hours of settled

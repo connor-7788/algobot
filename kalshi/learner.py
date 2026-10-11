@@ -34,6 +34,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+from kalshi import selector
 from kalshi.chart_model import ChartModel
 from kalshi.fees import worst_case_fee_per_contract_cents
 from kalshi.spot import norm_cdf
@@ -56,6 +57,7 @@ class LearnedParams:
     mode: str = "blend"              # "blend" (model x Kalshi price) or "chart" (chart model)
     chart: dict = field(default_factory=dict)       # latest chart model, adopted or not (exploration uses it)
     lessons: list = field(default_factory=list)
+    strategy: dict = field(default_factory=dict)    # best tested strategy (selector.select output)
 
     @property
     def paused(self) -> bool:
@@ -274,18 +276,28 @@ class Learner:
         mode = "chart" if use_chart else "blend"
         changed = adopt_cal or thr_use != cur.edge_min_cents or mode != cur.mode
         model_lessons = chart_all.lessons() if chart_all else []
+        best = None
+        try:
+            best = selector.select(self.journal.shadow_rows(limit=20000), min_t=self.s.selector_min_t)
+        except Exception as e:
+            log.warning("strategy selection failed: %s", e)
+        if best is not None:
+            best = {k: v for k, v in best.items()}
+        if (best or {}).get("strategy") != (cur.strategy or {}).get("strategy") or \
+                (best or {}).get("setup") != (cur.strategy or {}).get("setup"):
+            changed = True
         new = LearnedParams(sc_use, w_use, thr_use, cur.version + (1 if changed else 0),
                             datetime.now(timezone.utc).isoformat(), "learned from settled markets", metrics,
                             mode=mode, chart=chart_all.to_dict() if chart_all else cur.chart,
-                            lessons=model_lessons)
+                            lessons=model_lessons, strategy=best or {})
         self.store.set(new, self.journal)
         cal_note = (f"calibration updated: volatility x{cur.sigma_scale:g} -> x{sc:g}, model weight "
                     f"{cur.model_weight:g} -> {w:g} (held-out log loss {ll_cur:.4f} -> {ll_new:.4f}; "
                     f"market alone {ll_mkt:.4f})" if adopt_cal else
                     f"calibration kept (x{cur.sigma_scale:g}, weight {cur.model_weight:g})")
         taught = ("; chart says: " + "; ".join(model_lessons[:3])) if model_lessons else ""
-        self.last_report = (f"v{new.version} on {len(rows):,} snapshots: {chart_note}{taught}. {cal_note}. "
-                            f"{thr_note}.")
+        self.last_report = (f"v{new.version} on {len(rows):,} snapshots: {selector.describe(best)} "
+                            f"{chart_note}{taught}. {cal_note}. {thr_note}.")
         if changed:
             self.journal.log_event("learner", self.last_report)
         log.info(self.last_report)

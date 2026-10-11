@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from kalshi.agents.base import Candidate
+from kalshi.agents.shadow import pick_side, setup_key
 from kalshi.confidence import confidence_score
 from kalshi.features import chart_features, describe
 from kalshi.fees import worst_case_fee_per_contract_cents
@@ -86,6 +87,75 @@ class EdgeFinder:
         """Paper only: keep trading (on the chart model) while Learner has paused, to learn from trades."""
         p = self._learned()
         return bool(p and p.paused and self.s.paper_mode and self.s.paper_explore)
+
+    # ── Follow the best tested strategy ──────────────────────────────────────
+
+    def _following(self, ctx: dict) -> dict | None:
+        """The selected strategy to follow on this crypto market, or None to use edge pricing."""
+        if "crypto" not in ctx or not self.s.follow_best_strategy:
+            return None
+        p = self._learned()
+        if p is None or not p.strategy or not p.paused:
+            return None                     # a validated edge threshold beats any shadow strategy
+        if not (self.s.paper_mode or p.strategy.get("validated")):
+            return None                     # live mode only follows a strategy proven on newer markets
+        return p.strategy
+
+    def _follow_strategy(self, c: Candidate, ctx: dict, sources, st: dict) -> EdgeResult:
+        m, book = c.market, c.book
+        k = ctx["crypto"]
+        name, want_setup = st["strategy"], st.get("setup")
+        label = name + (f" ({want_setup})" if want_setup else "")
+        feats, secs = k.get("feats"), k["seconds_left"]
+        lo, hi = self.s.shadow_entry_min_secs, self.s.shadow_entry_max_secs
+        if not feats:
+            return EdgeResult(None, f"following {label}: no chart data for this market yet")
+        if not (lo <= secs <= hi):
+            return EdgeResult(None, f"following {label}: it enters with {lo / 60:.1f}-{hi / 60:.0f} min left, "
+                                    f"now {secs / 60:.1f} min")
+        bid, ask = book.best_bid_cents("yes"), book.best_ask_cents("yes")
+        pick = pick_side(name, feats, k.get("p_chart"), bid, ask, self.s)
+        if pick is None:
+            return EdgeResult(None, f"following {label}: no signal on this market (5-min momentum "
+                                    f"{feats.get('mom5', 0):+.1f}σ)")
+        side, why = pick
+        price = book.best_ask_cents(side)
+        if price is None or not (3 <= price <= 97):
+            return EdgeResult(None, f"following {label}: {side.upper()} ask {price} is outside 3-97c")
+        here = setup_key(feats, side, price)
+        if want_setup and here != want_setup:
+            return EdgeResult(None, f"following {label}: this market's setup is '{here}', skip")
+        limit = min(99, price + self.s.exec_slippage_cap_cents)
+        fee = worst_case_fee_per_contract_cents(limit, self.s)
+        va, tr = st["valid"], st["train"]
+        exp_cents = va["roi"] * (limit + fee)
+        fair_side = min(0.99, max(0.01, (limit + fee + exp_cents) / 100.0))
+        depth = book.ask_depth(side)
+        upper = int(min(self.s.edge_max_contracts, math.floor(depth * self.s.edge_max_depth_take)))
+        if upper < 1:
+            return EdgeResult(None, f"following {label}: ask depth {depth:g} too thin")
+        score, parts = confidence_score(n_books=len(sources), dispersion=0.0, edge_cents=exp_cents,
+                                        confirmations=0, spread_cents=book.spread_cents(), settings=self.s)
+        k = dict(k, strategy=name, strategy_setup=want_setup, strategy_validated=bool(st.get("validated")))
+        snapshot = {"side": side, "price_cents": price, "limit_cents": limit, "fee_cents_per_contract": round(fee, 4),
+                    "edge_cents": round(exp_cents, 3), "fair_side": round(fair_side, 5), "confidence": score,
+                    "confidence_parts": parts, "ask_depth": depth, "contract_count": upper,
+                    "book": book.snapshot(), "crypto": k,
+                    "strategy_record": {"older": tr, "newer": va}}
+        dist = -k["move_needed_pct"]
+        tag = "FOLLOWING BEST STRATEGY" + ("" if st.get("validated") else " (paper only: not yet validated on newer markets)")
+        reason = (f"{tag}: {label}. {why}. {k['asset']} is {abs(dist):.3f}% {'above' if dist >= 0 else 'below'} "
+                  f"the strike with {secs / 60:.1f} min left; chart: {describe(feats, side)}. Buy {side.upper()} at "
+                  f"{price}c (+{self.s.exec_slippage_cap_cents}c slippage, +{fee:.1f}c fee). Its record: "
+                  f"{tr['roi'] * 100:+.1f}% per $ on {tr['n']} older trades ({tr['win_rate'] * 100:.0f}% wins), "
+                  f"{va['roi'] * 100:+.1f}% on {va['n']} newer ({va['win_rate'] * 100:.0f}% wins).")
+        p = TradeProposal(
+            market_ticker=m.ticker, event_ticker=m.event_ticker, side=side, price_cents=price,
+            contract_count=upper, fair_probability=fair_side, sources=sources, series_ticker=m.series_ticker,
+            title=f"{m.title} | {label}", edge_cents=round(exp_cents, 3), fee_cents_per_contract=fee,
+            confidence_score=score, book_fetched_at=book.fetched_at, close_time=m.close_time)
+        p.add_verdict(self.name, Decision.APPROVE, reason, snapshot)
+        return EdgeResult(p, "proposed")
 
     # ── Fair value: sports (devigged sportsbook consensus) ───────────────────
 
@@ -250,6 +320,9 @@ class EdgeFinder:
             return EdgeResult(None, fair)
         sources, fair_yes, dispersion, ctx = fair
         self.history.record_fair(m.ticker, fair_yes)
+        follow = self._following(ctx)
+        if follow is not None:
+            return self._follow_strategy(c, ctx, sources, follow)
 
         best = None
         for side in ("yes", "no"):
