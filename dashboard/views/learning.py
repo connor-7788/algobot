@@ -60,19 +60,21 @@ def page():
     exploring = paused and s.paper_mode and s.paper_explore and bool(p.get("chart"))
     m = p.get("metrics") or {}
     c = st.columns(4)
-    c[0].metric("Pricing with", {"chart": "Chart model", "blend": "Kalshi price + distance model"}.get(mode, mode),
+    c[0].metric("Pricing with", {"chart": "Chart", "blend": "Kalshi"}.get(mode, mode),
                 help="The chart model is used for real decisions only after it beats Kalshi's own price on "
                      "markets it didn't train on.")
-    c[1].metric("Trading", "Exploring (paper)" if exploring else "Paused" if paused else
-                f"Edge ≥ {p.get('edge_min_cents', s.edge_min_cents):g}c")
+    c[1].metric("Trading", "Explore" if exploring else "Paused" if paused else
+                f"≥{p.get('edge_min_cents', s.edge_min_cents):g}c",
+                help="Explore = paper only: Learner found no proven edge, so the bot keeps taking small paper "
+                     "trades on the chart model to learn from its own results.")
     if m.get("chart_valid_logloss") is not None:
         gap = m["market_valid_logloss_chart_rows"] - m["chart_valid_logloss"]
-        c[2].metric("Chart model vs Kalshi", f"{gap:+.4f}",
+        c[2].metric("Chart vs Kalshi", f"{gap:+.4f}",
                     help="Held-out log loss of Kalshi's price minus the chart model's. Positive = the chart "
                          "model predicted outcomes better.")
     else:
-        c[2].metric("Chart model vs Kalshi", "n/a")
-    c[3].metric("Snapshots learned from", f"{counts.get('labelled', 0):,}",
+        c[2].metric("Chart vs Kalshi", "n/a")
+    c[3].metric("Snapshots", f"{counts.get('labelled', 0):,}",
                 f"{counts.get('markets', 0):,} markets", delta_color="off")
     if p.get("fitted_at"):
         st.caption(f"Model v{p.get('version', 0)}, refit {ago(p['fitted_at'])}. Refits every "
@@ -100,7 +102,7 @@ def page():
                         "Avg per contract": v["avg_cents"], "Total per contract": v["avg_cents"] * v["n"],
                         "t-stat": v["t"]} for k, v in g.items()]).sort_values("Avg per contract", ascending=False)
     st.dataframe(sb.style.format({"Win rate": "{:.0%}", "Avg per contract": cents,
-                                  "Total per contract": lambda v: f"{v / 100:+,.2f} $", "t-stat": "{:+.1f}"})
+                                  "Total per contract": lambda v: f"{'+' if v >= 0 else '-'}${abs(v) / 100:,.2f}", "t-stat": "{:+.1f}"})
                  .map(color, subset=["Avg per contract", "Total per contract"]),
                  hide_index=True, use_container_width=True)
     st.caption("'bot' is the bot's own trades. t-stat above +2 or below -2 is unlikely to be luck; "
