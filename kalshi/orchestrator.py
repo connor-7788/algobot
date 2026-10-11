@@ -370,7 +370,8 @@ class Orchestrator:
                       "model_weight": p.model_weight, "edge_min_cents": "PAUSED" if p.paused else p.edge_min_cents,
                       "chart_lessons": p.lessons, "trade_lessons": trade_lessons,
                       "observations": counts, "labelled_this_run": labelled, **p.metrics}
-            self.board.said(LEARNER, "PAUSE" if p.paused else "INFO", report + explore, detail=detail,
+            # Lead with how it's trading: the card truncates long messages at 1,000 characters.
+            self.board.said(LEARNER, "PAUSE" if p.paused else "INFO", explore.strip() + " " + report, detail=detail,
                             activity=f"next refit in {self.s.learner_interval_s / 60:.0f} min")
         except Exception as e:
             log.exception("learner failed")
